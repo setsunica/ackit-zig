@@ -1,15 +1,14 @@
 const std = @import("std");
 const tp = @import("tp.zig");
 
+const MyType = struct { a: []const u8 };
+
 pub fn main() !void {
-    const content =
+    const input =
         \\{"a": "b"}
     ;
-
-    const A = comptime {
-        try tp.Parse(u8, content);
-    };
-    _ = A;
+    var allocator = std.heap.page_allocator;
+    _ = try tp.parse(MyType, allocator, input);
     const stdin_file = std.io.getStdIn().reader();
     const stdout_file = std.io.getStdOut().writer();
     var br = std.io.bufferedReader(stdin_file);
