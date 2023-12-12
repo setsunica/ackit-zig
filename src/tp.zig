@@ -52,7 +52,7 @@ const Cursor = struct {
     }
 };
 
-fn parseField(comptime T: type, field: StructField, cur: *Cursor) !T {
+fn parseField(comptime T: type, comptime field: StructField, cur: *Cursor) !T {
     switch (@typeInfo(field.type)) {
         .Bool => {
             var next = cur.next();
@@ -67,7 +67,7 @@ fn parseField(comptime T: type, field: StructField, cur: *Cursor) !T {
         .Int => |i| try std.fmt.parseInt(i.type, cur.next(), 10),
         .Float => |f| try std.fmt.parseFloat(f.type, cur.next()),
         // .Array => |arr| unreachable,
-        else => @compileError(""),
+        else => @compileError("todo"),
     }
 }
 
@@ -75,17 +75,16 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
     // std.json.parseFree();
     var arena = try allocator.create(std.heap.ArenaAllocator);
     var arena_allocator = arena.allocator();
-    var cur = &Cursor.init(arena, input);
+    var cur = Cursor.init(arena, input);
     const v = switch (@typeInfo(T)) {
         inline .Struct => |s| {
             const v: T = undefined;
             inline for (0..s.fields.len) |i| {
-                const field_type = comptime {
-                    return s.fields[i].type;
-                };
-                @field(v, s.fields[i].name) = try parseField(field_type, s.fields[i], cur);
+                const field_type = s.fields[i].type;
+                const field = s.fields[i];
+                @field(v, s.fields[i].name) = try parseField(field_type, field, &cur);
             }
-            return v;
+            v;
         },
         inline else => @compileError("Failed to parse input. No support for non-structures."),
     };
