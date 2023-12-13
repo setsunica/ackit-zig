@@ -18,7 +18,7 @@ pub fn Parsed(comptime T: type) type {
         arena: ArenaAllocator,
         value: T,
 
-        fn init(value: T, arena: ArenaAllocator) Parsed(T) {
+        fn init(arena: ArenaAllocator, value: T) Parsed(T) {
             return .{ .arena = arena, .value = value };
         }
 
@@ -134,7 +134,7 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
                 const field = comptime s.fields[i];
                 @field(v, field.name) = try scanner.parseField(field.type);
             }
-            return Parsed(T).init(v, arena);
+            return Parsed(T).init(arena, v);
         },
         else => @compileError("invalid input type, no support for non-structures"),
     }
