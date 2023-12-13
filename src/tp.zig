@@ -126,6 +126,7 @@ const Scanner = struct {
 pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(T) {
     // std.json.parseFree();
     var arena = ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
     var scanner = Scanner.init(&arena, input);
     switch (@typeInfo(T)) {
         .Struct => |s| {
