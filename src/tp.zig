@@ -44,13 +44,12 @@ const Cursor = struct {
     }
 
     fn next(self: *Cursor) ?[]const u8 {
-        if (self.word_iter.next()) |w|
-            return w
-        else if (self.line_iter.next()) |l| {
+        return if (self.word_iter.next()) |w|
+            w
+        else if (self.line_iter.next()) |l| blk: {
             self.word_iter = std.mem.splitScalar(u8, l, ' ');
-            return self.next();
-        }
-        return null;
+            break :blk self.next();
+        } else null;
     }
 
     fn nextLine(self: *Cursor) ?SplitIterator(u8, .scalar) {
@@ -80,9 +79,7 @@ const Scanner = struct {
                 false
             else
                 error.ParseBoolError,
-            .Int => |i| std.fmt.parseInt(@Type(.{ .Int = i }), s, 10) catch |err| {
-                return err;
-            },
+            .Int => |i| std.fmt.parseInt(@Type(.{ .Int = i }), s, 10),
             .Float => |f| try std.fmt.parseFloat(@Type(.{ .Float = f }), s),
             else => @compileError("invalid type for parsing"),
         };
@@ -144,13 +141,13 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
 }
 
 test "parse custom input" {
-    const s = "11 12\n13";
+    const s = "11 12 13.5";
     const A = struct { x: u32, y: i32, z: f32 };
     var allocator = std.testing.allocator;
     var parsed = try parse(A, allocator, s);
     defer parsed.deinit();
     try testing.expectEqual(@as(u32, 11), parsed.value.x);
     try testing.expectEqual(@as(i32, 12), parsed.value.y);
-    try testing.expectEqual(@as(f32, 13.0), parsed.value.z);
-    try testing.expectEqualDeep(.{ .x = 13, .y = 10, .z = 13.0 }, parsed.value);
+    try testing.expectEqual(@as(f32, 13.5), parsed.value.z);
+    try testing.expectEqualDeep(A{ .x = 11, .y = 12, .z = 13.5 }, parsed.value);
 }
