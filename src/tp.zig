@@ -132,7 +132,7 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
         .Struct => |s| {
             var v: T = undefined;
             inline for (0..s.fields.len) |i| {
-                const field = comptime s.fields[i];
+                const field = s.fields[i];
                 @field(v, field.name) = try scanner.parseField(field.type);
             }
             return Parsed(T).init(arena, v);
