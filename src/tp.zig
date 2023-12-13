@@ -3,6 +3,7 @@ const builtin = std.builtin;
 const Allocator = std.mem.Allocator;
 const StructField = builtin.Type.StructField;
 const ArrayList = std.ArrayList;
+const SplitIterator = std.mem.SplitIterator;
 
 pub fn Parsed(comptime T: type) type {
     return struct {
@@ -16,58 +17,105 @@ pub fn Parsed(comptime T: type) type {
 }
 
 const Cursor = struct {
-    // arena: *std.heap.ArenaAllocator,
     input: []const u8,
-    // pos: u32,
-    line_iter: std.mem.SplitIterator(u8, std.mem.DelimiterType.scalar),
-    word_iter: std.mem.SplitIterator(u8, std.mem.DelimiterType.scalar),
+    line_iter: SplitIterator(u8, .scalar),
+    word_iter: SplitIterator(u8, .scalar),
 
-    fn init(arena: *std.heap.ArenaAllocator, input: []const u8) Cursor {
-        _ = arena;
+    fn init(input: []const u8) Cursor {
         return Cursor{
-            // .arena = arena,
             .input = input,
-            // .pos = 0,
             .line_iter = std.mem.splitScalar(u8, input, '\n'),
             .word_iter = std.mem.splitScalar(u8, input, ' '),
         };
     }
 
     fn next(self: *Cursor) ?[]const u8 {
-        if (self.word_iter.next()) |w| {
-            return w;
-        } else if (self.line_iter.next()) |l| {
+        if (self.word_iter.next()) |w|
+            w
+        else if (self.line_iter.next()) |l| {
             self.word_iter = std.mem.splitScalar(u8, l, ' ');
             return self.next();
         }
         return null;
     }
 
-    fn nextLine(self: *Cursor) ?[]const u8 {
-        if (self.line_iter.next()) |l| {
-            self.word_iter = std.mem.splitScalar(u8, l, ' ');
-            return l;
-        }
-        return null;
+    fn nextLine(self: *Cursor) ?SplitIterator(u8, .scalar) {
+        if (self.line_iter.next()) |l|
+            std.mem.splitScalar(u8, l, ' ')
+        else
+            return null;
     }
 };
 
-fn parseField(comptime T: type, comptime field: StructField, cur: *Cursor) !T {
-    switch (@typeInfo(field.type)) {
-        .Bool => {
-            var next = cur.next();
-            return if (std.mem.eql(u8, next, "true")) {
-                true;
-            } else if (std.mem.eql(u8, next, "false")) {
-                false;
-            } else return {
-                error{ParseBoolError};
-            };
-        },
-        .Int => |i| try std.fmt.parseInt(i.type, cur.next(), 10),
-        .Float => |f| try std.fmt.parseFloat(f.type, cur.next()),
-        // .Array => |arr| unreachable,
-        else => @compileError("todo"),
+const Scanner = struct {
+    arena: *std.heap.ArenaAllocator,
+    cur: *Cursor,
+
+    fn init(arena: *std.heap.ArenaAllocator, input: []const u8) Scanner {
+        return .{
+            .arena = arena,
+            .cur = Cursor.init(input),
+        };
+    }
+
+    fn parse(comptime T: type, s: []const u8) !T {
+        switch (@typeInfo(T)) {
+            inline .Bool => if (std.mem.eql(u8, s, "true"))
+                true
+            else if (std.mem.eql(u8, s, "false"))
+                false
+            else
+                error{ParseBoolError},
+            inline .Int => |i| try std.fmt.parseInt(i.type, s, 10),
+            inline .Float => |f| try std.fmt.parseFloat(f.type, s),
+            _ => @compileError("Word parsing failed. Unsupported type."),
+        }
+    }
+
+    fn parseNext(self: Scanner, comptime T: type) !T {
+        const w = if (self.cur.next()) |w| w else {
+            return error{ParseNextError};
+        };
+        return self.parse(T, w);
+    }
+
+    fn parseNextLine(self: Scanner, comptime T: type) ![]T {
+        var arr = ArrayList(T).init(self.arena.allocator());
+        const li =
+            if (self.cur.nextLine()) |l|
+            l
+        else {
+            return arr;
+        };
+        for (li) |w| {
+            const v = try self.parse(T, w);
+            arr.append(v);
+        }
+        return try arr.toOwnedSlice();
+    }
+
+    fn parseNextLineArray(self: Scanner, comptime T: type, comptime len: usize) !?[len]T {
+        var arr: [len]T = undefined;
+        const li =
+            if (self.cur.nextLine()) |l|
+            l
+        else {
+            return null;
+        };
+        for (li, 0..) |w, i| {
+            const v = try self.parse(T, w);
+            arr[i] = v;
+        }
+        return arr;
+    }
+};
+
+fn parseField(comptime T: type, scanner: Scanner) !T {
+    switch (@typeInfo(T)) {
+        .Bool, .Int, .Float => try scanner.parseNext(T),
+        .Slice => |sl| try scanner.parseNextLine(sl.child),
+        .Array => |arr| try scanner.parseNextLineArray(arr.child, arr.len),
+        else => @compileError("Failed to parse input field. Unsupported field types."),
     }
 }
 
@@ -75,14 +123,15 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
     // std.json.parseFree();
     var arena = try allocator.create(std.heap.ArenaAllocator);
     var arena_allocator = arena.allocator();
-    var cur = Cursor.init(arena, input);
+    var scanner = Scanner.init(arena, input);
     const v = switch (@typeInfo(T)) {
         inline .Struct => |s| {
             const v: T = undefined;
             inline for (0..s.fields.len) |i| {
                 const field_type = s.fields[i].type;
                 const field = s.fields[i];
-                @field(v, s.fields[i].name) = try parseField(field_type, field, &cur);
+                _ = field;
+                @field(v, s.fields[i].name) = try parseField(field_type, scanner);
             }
             v;
         },
