@@ -4,13 +4,14 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const builtin = std.builtin;
 const StructField = builtin.Type.StructField;
-const SplitIterator = std.mem.SplitIterator;
+const TokenIterator = std.mem.TokenIterator;
 const Type = builtin.Type;
 const testing = std.testing;
 
 const ScanError = error{
     NoNextWord,
     NoNextLine,
+    InvalidArraySize,
 };
 
 pub fn Parsed(comptime T: type) type {
@@ -22,41 +23,48 @@ pub fn Parsed(comptime T: type) type {
             return .{ .arena = arena, .value = value };
         }
 
-        fn deinit(self: Parsed(T)) void {
-            // var alloc = self.arena.child_allocator;
+        pub fn deinit(self: Parsed(T)) void {
             self.arena.deinit();
-            // alloc.destroy(self.arena);
         }
     };
 }
 
 const Cursor = struct {
+    const w_token = ' ';
+    const l_token = '\n';
     input: []const u8,
-    line_iter: SplitIterator(u8, .scalar),
-    word_iter: SplitIterator(u8, .scalar),
+    l_iter: TokenIterator(u8),
+    w_iter: TokenIterator(u8),
 
     fn init(input: []const u8) Cursor {
+        var l_iter = std.mem.tokenize(u8, input, "\n");
+        var w_iter = std.mem.tokenize(u8, l_iter.next() orelse "", " ");
         return .{
             .input = input,
-            .line_iter = std.mem.splitScalar(u8, input, '\n'),
-            .word_iter = std.mem.splitScalar(u8, input, ' '),
+            .l_iter = l_iter,
+            .w_iter = w_iter,
         };
     }
 
-    fn next(self: *Cursor) ?[]const u8 {
-        return if (self.word_iter.next()) |w|
+    fn nextW(self: *Cursor) ?[]const u8 {
+        return if (self.w_iter.next()) |w|
             w
-        else if (self.line_iter.next()) |l| blk: {
-            self.word_iter = std.mem.splitScalar(u8, l, ' ');
-            break :blk self.next();
+        else if (self.l_iter.next()) |l| blk: {
+            self.w_iter = std.mem.tokenize(u8, l, " ");
+            break :blk self.nextW();
         } else null;
     }
 
-    fn nextLine(self: *Cursor) ?SplitIterator(u8, .scalar) {
-        return if (self.line_iter.next()) |l|
-            std.mem.splitScalar(u8, l, ' ')
-        else
-            null;
+    fn nextL(self: *Cursor) ?TokenIterator(u8) {
+        return if (self.w_iter.peek()) |_| blk: {
+            var ws = self.w_iter;
+            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", " ");
+            break :blk ws;
+        } else if (self.l_iter.next()) |l| blk: {
+            var ws = std.mem.tokenize(u8, l, " ");
+            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", " ");
+            break :blk ws;
+        } else null;
     }
 };
 
@@ -71,84 +79,154 @@ const Scanner = struct {
         };
     }
 
-    fn parse(comptime T: type, s: []const u8) !T {
-        return switch (@typeInfo(T)) {
-            .Bool => if (std.mem.eql(u8, s, "true"))
-                true
-            else if (std.mem.eql(u8, s, "false"))
-                false
-            else
-                error.ParseBoolError,
-            .Int => |i| std.fmt.parseInt(@Type(.{ .Int = i }), s, 10),
-            .Float => |f| try std.fmt.parseFloat(@Type(.{ .Float = f }), s),
-            else => @compileError("invalid type for parsing"),
-        };
-    }
-
-    fn parseNext(self: *Scanner, comptime T: type) !T {
-        const w = self.cur.next() orelse return error.NoNextWord;
-        return try Scanner.parse(T, w);
-    }
-
-    fn parseNextLine(self: *Scanner, comptime T: type) ![]T {
-        var arr = ArrayList(T).init(self.arena.allocator());
-        var li = self.cur.nextLine() orelse return error.NoNextLine;
-        while (li.next()) |w| {
-            const v = try Scanner.parse(T, w);
-            try arr.append(v);
-        }
-        return try arr.toOwnedSlice();
-    }
-
-    fn parseNextLineArray(self: *Scanner, comptime T: type, comptime len: usize) !?[len]T {
-        var arr: [len]T = undefined;
-        const li = if (self.cur.nextLine()) |l| l else return null;
-        for (li, 0..) |w, i| {
-            const v = try self.parse(T, w);
-            arr[i] = v;
-        }
-        return arr;
-    }
-
-    fn parseField(self: *Scanner, comptime T: type) !T {
-        return switch (@typeInfo(T)) {
-            .Bool, .Int, .Float => try self.parseNext(T),
-            .Pointer => |p| if (p.size == .Slice)
-                try self.parseNextLine(p.child)
-            else
-                @compileError("invalid field, non-slice pointers are not supported"),
-            .Array => |arr| try self.parseNextLineArray(arr.child, arr.len),
+    fn parse(self: *Scanner, comptime T: type) !T {
+        switch (@typeInfo(T)) {
+            .Bool => {
+                const w = self.cur.nextW() orelse return error.NoNextWord;
+                return if (std.mem.eql(u8, w, "true"))
+                    true
+                else if (std.mem.eql(u8, w, "false"))
+                    false
+                else
+                    error.ParseBoolError;
+            },
+            .Int => |i| {
+                const w = self.cur.nextW() orelse return error.NoNextWord;
+                return if (i.bits == 8 and i.signedness == .unsigned)
+                    w[0]
+                else
+                    std.fmt.parseInt(@Type(.{ .Int = i }), w, 10);
+            },
+            .Float => |f| {
+                const w = self.cur.nextW() orelse return error.NoNextWord;
+                return try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
+            },
+            .Pointer => |p| {
+                switch (p.size) {
+                    .Slice => {
+                        if (p.child == u8) {
+                            return self.cur.nextW() orelse return error.NoNextWord;
+                        }
+                        var arr = ArrayList(p.child).init(self.arena.allocator());
+                        var li = self.cur.nextL() orelse return error.NoNextLine;
+                        while (li.next()) |w| {
+                            _ = w;
+                            const v = try self.parse(p.child);
+                            try arr.append(v);
+                        }
+                        return try arr.toOwnedSlice();
+                    },
+                    else => @compileError("invalid field, non-slice pointers are not supported"),
+                }
+            },
+            .Array => |a| {
+                if (a.child == u8) {
+                    const s = (self.cur.nextW() orelse return error.NoNextWord);
+                    if (s.len < a.len) {
+                        return error.InvalidArraySize;
+                    }
+                    return s[0..a.len].*;
+                }
+                var r: [a.len]a.child = undefined;
+                comptime var i: usize = 0;
+                inline while (i < a.len) : (i += 1) {
+                    const v = try self.parse(a.child);
+                    r[i] = v;
+                }
+                return r;
+            },
+            .Struct => |s| {
+                var v: T = undefined;
+                comptime var i: usize = 0;
+                inline while (i < s.fields.len) : (i += 1) {
+                    const field = s.fields[i];
+                    @field(v, field.name) = try self.parse(field.field_type);
+                }
+                return v;
+            },
             else => @compileError("invalid field, unsupported field types"),
-        };
+        }
     }
 };
 
 pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(T) {
-    // std.json.parseFree();
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     var scanner = Scanner.init(&arena, input);
-    switch (@typeInfo(T)) {
-        .Struct => |s| {
-            var v: T = undefined;
-            inline for (0..s.fields.len) |i| {
-                const field = s.fields[i];
-                @field(v, field.name) = try scanner.parseField(field.type);
-            }
-            return Parsed(T).init(arena, v);
-        },
-        else => @compileError("invalid input type, no support for non-structures"),
-    }
+    const v = try scanner.parse(T);
+    return Parsed(T).init(arena, v);
+}
+
+test "read next one" {
+    const s =
+        \\11 12
+        \\13.5
+        \\abc
+        \\x y z
+    ;
+    var cursor = Cursor.init(s);
+    try testing.expectEqualStrings("11", cursor.nextW().?);
+    try testing.expectEqualStrings("12", cursor.nextW().?);
+    try testing.expectEqualStrings("13.5", cursor.nextW().?);
+    try testing.expectEqualStrings("abc", cursor.nextW().?);
+    try testing.expectEqualStrings("x", cursor.nextW().?);
+    try testing.expectEqualStrings("y", cursor.nextW().?);
+    try testing.expectEqualStrings("z", cursor.nextW().?);
+}
+
+test "read next line" {
+    const s =
+        \\11 12
+        \\13.5
+        \\abc
+        \\x y z
+    ;
+    var cursor = Cursor.init(s);
+    try testing.expectEqualStrings("11 12", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("13.5", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("abc", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("x y z", cursor.nextL().?.rest());
+}
+
+test "read rest" {
+    const s =
+        \\11 12
+        \\13.5
+        \\abc
+        \\x y z
+    ;
+    var cursor = Cursor.init(s);
+    try testing.expectEqualStrings("11", cursor.nextW().?);
+    try testing.expectEqualStrings("12", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("13.5", cursor.nextW().?);
+    try testing.expectEqualStrings("abc", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("x", cursor.nextW().?);
+    try testing.expectEqualStrings("y", cursor.nextW().?);
+    try testing.expectEqualStrings("z", cursor.nextL().?.rest());
 }
 
 test "parse custom input" {
-    const s = "11 12 13.5";
-    const A = struct { x: u32, y: i32, z: f32 };
+    const s =
+        \\true
+        \\false
+        \\a
+        \\-10
+        \\12.3
+        \\abc
+        \\defghijklm
+        \\ghi
+    ;
+    // const A = struct { b: bool, c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8, sp: [*]const u8 };
+    const A = struct { bt: bool, bf: bool, c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
     var allocator = std.testing.allocator;
     var parsed = try parse(A, allocator, s);
     defer parsed.deinit();
-    try testing.expectEqual(@as(u32, 11), parsed.value.x);
-    try testing.expectEqual(@as(i32, 12), parsed.value.y);
-    try testing.expectEqual(@as(f32, 13.5), parsed.value.z);
-    try testing.expectEqualDeep(A{ .x = 11, .y = 12, .z = 13.5 }, parsed.value);
+    try testing.expectEqual(true, parsed.value.bt);
+    try testing.expectEqual(false, parsed.value.bf);
+    try testing.expectEqual(@as(u8, 'a'), parsed.value.c);
+    try testing.expectEqual(@as(i32, -10), parsed.value.i);
+    try testing.expectEqual(@as(f64, 12.3), parsed.value.f);
+    try testing.expectEqualStrings("abc", parsed.value.s);
+    try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
+    // try testing.expectEqualDeep(A{ .x = 11, .y = 12, .z = 13.5 }, parsed.value);
 }
