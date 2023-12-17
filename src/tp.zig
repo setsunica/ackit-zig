@@ -29,18 +29,19 @@ pub fn Parsed(comptime T: type) type {
     };
 }
 
+const w_token = " ";
+const l_token = "\n";
+
 const Cursor = struct {
-    const w_token = ' ';
-    const l_token = '\n';
-    input: []const u8,
+    source: []const u8,
     l_iter: TokenIterator(u8),
     w_iter: TokenIterator(u8),
 
-    fn init(input: []const u8) Cursor {
-        var l_iter = std.mem.tokenize(u8, input, "\n");
-        var w_iter = std.mem.tokenize(u8, l_iter.next() orelse "", " ");
+    fn init(source: []const u8) Cursor {
+        var l_iter = std.mem.tokenize(u8, source, l_token);
+        var w_iter = std.mem.tokenize(u8, l_iter.next() orelse "", w_token);
         return .{
-            .input = input,
+            .source = source,
             .l_iter = l_iter,
             .w_iter = w_iter,
         };
@@ -50,7 +51,7 @@ const Cursor = struct {
         return if (self.w_iter.next()) |w|
             w
         else if (self.l_iter.next()) |l| blk: {
-            self.w_iter = std.mem.tokenize(u8, l, " ");
+            self.w_iter = std.mem.tokenize(u8, l, w_token);
             break :blk self.nextW();
         } else null;
     }
@@ -58,11 +59,11 @@ const Cursor = struct {
     fn nextL(self: *Cursor) ?TokenIterator(u8) {
         return if (self.w_iter.peek()) |_| blk: {
             var ws = self.w_iter;
-            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", " ");
+            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
             break :blk ws;
         } else if (self.l_iter.next()) |l| blk: {
-            var ws = std.mem.tokenize(u8, l, " ");
-            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", " ");
+            var ws = std.mem.tokenize(u8, l, w_token);
+            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
             break :blk ws;
         } else null;
     }
@@ -70,19 +71,19 @@ const Cursor = struct {
 
 const Scanner = struct {
     arena: *std.heap.ArenaAllocator,
-    cur: Cursor,
+    cursor: Cursor,
 
-    fn init(arena: *std.heap.ArenaAllocator, input: []const u8) Scanner {
+    fn init(arena: *std.heap.ArenaAllocator, source: []const u8) Scanner {
         return .{
             .arena = arena,
-            .cur = Cursor.init(input),
+            .cursor = Cursor.init(source),
         };
     }
 
-    fn parse(self: *Scanner, comptime T: type) !T {
+    fn scan(self: *Scanner, comptime T: type) !T {
         switch (@typeInfo(T)) {
             .Bool => {
-                const w = self.cur.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.nextW() orelse return error.NoNextWord;
                 return if (std.mem.eql(u8, w, "true"))
                     true
                 else if (std.mem.eql(u8, w, "false"))
@@ -91,27 +92,27 @@ const Scanner = struct {
                     error.ParseBoolError;
             },
             .Int => |i| {
-                const w = self.cur.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.nextW() orelse return error.NoNextWord;
                 return if (i.bits == 8 and i.signedness == .unsigned)
                     w[0]
                 else
                     std.fmt.parseInt(@Type(.{ .Int = i }), w, 10);
             },
             .Float => |f| {
-                const w = self.cur.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.nextW() orelse return error.NoNextWord;
                 return try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
             },
             .Pointer => |p| {
                 switch (p.size) {
                     .Slice => {
                         if (p.child == u8) {
-                            return self.cur.nextW() orelse return error.NoNextWord;
+                            return self.cursor.nextW() orelse return error.NoNextWord;
                         }
                         var arr = ArrayList(p.child).init(self.arena.allocator());
-                        var li = self.cur.nextL() orelse return error.NoNextLine;
+                        var li = self.cursor.nextL() orelse return error.NoNextLine;
                         while (li.next()) |w| {
                             _ = w;
-                            const v = try self.parse(p.child);
+                            const v = try self.scan(p.child);
                             try arr.append(v);
                         }
                         return try arr.toOwnedSlice();
@@ -121,7 +122,7 @@ const Scanner = struct {
             },
             .Array => |a| {
                 if (a.child == u8) {
-                    const s = (self.cur.nextW() orelse return error.NoNextWord);
+                    const s = (self.cursor.nextW() orelse return error.NoNextWord);
                     if (s.len < a.len) {
                         return error.InvalidArraySize;
                     }
@@ -130,7 +131,7 @@ const Scanner = struct {
                 var r: [a.len]a.child = undefined;
                 comptime var i: usize = 0;
                 inline while (i < a.len) : (i += 1) {
-                    const v = try self.parse(a.child);
+                    const v = try self.scan(a.child);
                     r[i] = v;
                 }
                 return r;
@@ -140,7 +141,7 @@ const Scanner = struct {
                 comptime var i: usize = 0;
                 inline while (i < s.fields.len) : (i += 1) {
                     const field = s.fields[i];
-                    @field(v, field.name) = try self.parse(field.field_type);
+                    @field(v, field.name) = try self.scan(field.field_type);
                 }
                 return v;
             },
@@ -153,8 +154,27 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     var scanner = Scanner.init(&arena, input);
-    const v = try scanner.parse(T);
+    const v = try scanner.scan(T);
     return Parsed(T).init(arena, v);
+}
+
+const Printer = struct {
+    alloc: Allocator,
+    dest: []const u8,
+
+    fn init(allocator: Allocator) Printer {
+        return .{ .alloc = allocator, .output = undefined };
+    }
+
+    fn print(comptime T: type, value: T) !void {
+        _ = value;
+        switch (@typeInfo(T)) {}
+    }
+};
+
+pub fn compose(comptime T: type, allocator: Allocator, output: T) ![]const u8 {
+    _ = output;
+    _ = allocator;
 }
 
 test "read next one" {
