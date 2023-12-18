@@ -47,16 +47,16 @@ const Cursor = struct {
         };
     }
 
-    fn nextW(self: *Cursor) ?[]const u8 {
+    fn readW(self: *Cursor) ?[]const u8 {
         return if (self.w_iter.next()) |w|
             w
         else if (self.l_iter.next()) |l| blk: {
             self.w_iter = std.mem.tokenize(u8, l, w_token);
-            break :blk self.nextW();
+            break :blk self.readW();
         } else null;
     }
 
-    fn nextL(self: *Cursor) ?TokenIterator(u8) {
+    fn readL(self: *Cursor) ?TokenIterator(u8) {
         return if (self.w_iter.peek()) |_| blk: {
             var ws = self.w_iter;
             self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
@@ -83,7 +83,7 @@ const Scanner = struct {
     fn scan(self: *Scanner, comptime T: type) !T {
         switch (@typeInfo(T)) {
             .Bool => {
-                const w = self.cursor.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.readW() orelse return error.NoNextWord;
                 return if (std.mem.eql(u8, w, "true"))
                     true
                 else if (std.mem.eql(u8, w, "false"))
@@ -92,24 +92,24 @@ const Scanner = struct {
                     error.ParseBoolError;
             },
             .Int => |i| {
-                const w = self.cursor.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.readW() orelse return error.NoNextWord;
                 return if (i.bits == 8 and i.signedness == .unsigned)
                     w[0]
                 else
                     std.fmt.parseInt(@Type(.{ .Int = i }), w, 10);
             },
             .Float => |f| {
-                const w = self.cursor.nextW() orelse return error.NoNextWord;
+                const w = self.cursor.readW() orelse return error.NoNextWord;
                 return try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
             },
             .Pointer => |p| {
                 switch (p.size) {
                     .Slice => {
                         if (p.child == u8) {
-                            return self.cursor.nextW() orelse return error.NoNextWord;
+                            return self.cursor.readW() orelse return error.NoNextWord;
                         }
                         var arr = ArrayList(p.child).init(self.arena.allocator());
-                        var li = self.cursor.nextL() orelse return error.NoNextLine;
+                        var li = self.cursor.readL() orelse return error.NoNextLine;
                         while (li.next()) |w| {
                             _ = w;
                             const v = try self.scan(p.child);
@@ -117,12 +117,12 @@ const Scanner = struct {
                         }
                         return try arr.toOwnedSlice();
                     },
-                    else => @compileError("invalid field, non-slice pointers are not supported"),
+                    else => @compileError("invalid type, non-slice pointers are not supported"),
                 }
             },
             .Array => |a| {
                 if (a.child == u8) {
-                    const s = (self.cursor.nextW() orelse return error.NoNextWord);
+                    const s = (self.cursor.readW() orelse return error.NoNextWord);
                     if (s.len < a.len) {
                         return error.InvalidArraySize;
                     }
@@ -145,7 +145,7 @@ const Scanner = struct {
                 }
                 return v;
             },
-            else => @compileError("invalid field, unsupported field types"),
+            else => @compileError("unsupported types for parsing"),
         }
     }
 };
@@ -158,23 +158,67 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
     return Parsed(T).init(arena, v);
 }
 
-const Printer = struct {
-    alloc: Allocator,
-    dest: []const u8,
+pub const Composed = struct {
+    arena: ArenaAllocator,
+    value: []const u8,
 
-    fn init(allocator: Allocator) Printer {
-        return .{ .alloc = allocator, .output = undefined };
+    fn init(arena: ArenaAllocator, value: []const u8) Composed {
+        return .{ .arena = arena, .value = value };
     }
 
-    fn print(comptime T: type, value: T) !void {
-        _ = value;
-        switch (@typeInfo(T)) {}
+    pub fn deinit(self: Composed) void {
+        self.arena.deinit();
     }
 };
 
-pub fn compose(comptime T: type, allocator: Allocator, output: T) ![]const u8 {
-    _ = output;
-    _ = allocator;
+const Accumulator = struct {
+    dest: []const u8,
+
+    fn init(buf: []const u8) Accumulator {
+        return .{ .dest = buf };
+    }
+
+    fn writeW(v: []const u8) !void {
+        _ = v;
+    }
+
+    fn writeL(v: []const u8) !void {
+        _ = v;
+    }
+};
+
+const Printer = struct {
+    arena: *std.heap.ArenaAllocator,
+    acc: Accumulator,
+
+    fn init(arena: *std.heap.ArenaAllocator) !Printer {
+        var buf = try arena.allocator().alloc(u8, 1024 * 4);
+        return .{ .arena = arena, .acc = Accumulator.init(buf) };
+    }
+
+    fn print(self: *Printer, comptime T: type, value: T) !void {
+        _ = value;
+        _ = self;
+        switch (@typeInfo(T)) {
+            .Bool, .Int, .Float => {
+                // TODO: Implement string accumulation.
+            },
+            .Pointer => |p| switch (p.size) {
+                .Slice => if (p.child == u8) {
+                    // TODO: Implement string accumulation.
+                },
+                else => @compileError("invalid type, non-slice pointers are not supported"),
+            },
+            else => @compileError("unsupported types for composing"),
+        }
+    }
+};
+
+pub fn compose(comptime T: type, allocator: Allocator, output: T) !Composed {
+    var arena = ArenaAllocator.init(allocator);
+    var printer = try Printer.init(&arena);
+    try printer.print(T, output);
+    return Composed.init(arena, printer.acc.dest);
 }
 
 test "read next one" {
@@ -185,13 +229,13 @@ test "read next one" {
         \\x y z
     ;
     var cursor = Cursor.init(s);
-    try testing.expectEqualStrings("11", cursor.nextW().?);
-    try testing.expectEqualStrings("12", cursor.nextW().?);
-    try testing.expectEqualStrings("13.5", cursor.nextW().?);
-    try testing.expectEqualStrings("abc", cursor.nextW().?);
-    try testing.expectEqualStrings("x", cursor.nextW().?);
-    try testing.expectEqualStrings("y", cursor.nextW().?);
-    try testing.expectEqualStrings("z", cursor.nextW().?);
+    try testing.expectEqualStrings("11", cursor.readW().?);
+    try testing.expectEqualStrings("12", cursor.readW().?);
+    try testing.expectEqualStrings("13.5", cursor.readW().?);
+    try testing.expectEqualStrings("abc", cursor.readW().?);
+    try testing.expectEqualStrings("x", cursor.readW().?);
+    try testing.expectEqualStrings("y", cursor.readW().?);
+    try testing.expectEqualStrings("z", cursor.readW().?);
 }
 
 test "read next line" {
@@ -202,10 +246,10 @@ test "read next line" {
         \\x y z
     ;
     var cursor = Cursor.init(s);
-    try testing.expectEqualStrings("11 12", cursor.nextL().?.rest());
-    try testing.expectEqualStrings("13.5", cursor.nextL().?.rest());
-    try testing.expectEqualStrings("abc", cursor.nextL().?.rest());
-    try testing.expectEqualStrings("x y z", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("11 12", cursor.readL().?.rest());
+    try testing.expectEqualStrings("13.5", cursor.readL().?.rest());
+    try testing.expectEqualStrings("abc", cursor.readL().?.rest());
+    try testing.expectEqualStrings("x y z", cursor.readL().?.rest());
 }
 
 test "read rest" {
@@ -216,13 +260,13 @@ test "read rest" {
         \\x y z
     ;
     var cursor = Cursor.init(s);
-    try testing.expectEqualStrings("11", cursor.nextW().?);
-    try testing.expectEqualStrings("12", cursor.nextL().?.rest());
-    try testing.expectEqualStrings("13.5", cursor.nextW().?);
-    try testing.expectEqualStrings("abc", cursor.nextL().?.rest());
-    try testing.expectEqualStrings("x", cursor.nextW().?);
-    try testing.expectEqualStrings("y", cursor.nextW().?);
-    try testing.expectEqualStrings("z", cursor.nextL().?.rest());
+    try testing.expectEqualStrings("11", cursor.readW().?);
+    try testing.expectEqualStrings("12", cursor.readL().?.rest());
+    try testing.expectEqualStrings("13.5", cursor.readW().?);
+    try testing.expectEqualStrings("abc", cursor.readL().?.rest());
+    try testing.expectEqualStrings("x", cursor.readW().?);
+    try testing.expectEqualStrings("y", cursor.readW().?);
+    try testing.expectEqualStrings("z", cursor.readL().?.rest());
 }
 
 test "parse custom input" {
@@ -236,9 +280,8 @@ test "parse custom input" {
         \\defghijklm
         \\ghi
     ;
-    // const A = struct { b: bool, c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8, sp: [*]const u8 };
     const A = struct { bt: bool, bf: bool, c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
-    var allocator = std.testing.allocator;
+    var allocator = testing.allocator;
     var parsed = try parse(A, allocator, s);
     defer parsed.deinit();
     try testing.expectEqual(true, parsed.value.bt);
@@ -248,5 +291,12 @@ test "parse custom input" {
     try testing.expectEqual(@as(f64, 12.3), parsed.value.f);
     try testing.expectEqualStrings("abc", parsed.value.s);
     try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
-    // try testing.expectEqualDeep(A{ .x = 11, .y = 12, .z = 13.5 }, parsed.value);
+}
+
+test "compose custom output" {
+    const a: []const u8 = "abc";
+    const allocator = std.testing.allocator;
+    const composed = try compose([]const u8, allocator, a);
+    defer composed.deinit();
+    try testing.expectEqualStrings("abc", composed.value);
 }
