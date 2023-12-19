@@ -70,12 +70,12 @@ const Cursor = struct {
 };
 
 const Scanner = struct {
-    arena: *std.heap.ArenaAllocator,
+    allocator: Allocator,
     cursor: Cursor,
 
-    fn init(arena: *std.heap.ArenaAllocator, source: []const u8) Scanner {
+    fn init(allocator: Allocator, source: []const u8) Scanner {
         return .{
-            .arena = arena,
+            .allocator = allocator,
             .cursor = Cursor.init(source),
         };
     }
@@ -108,7 +108,7 @@ const Scanner = struct {
                         if (p.child == u8) {
                             return self.cursor.readW() orelse return error.NoNextWord;
                         }
-                        var arr = ArrayList(p.child).init(self.arena.allocator());
+                        var arr = ArrayList(p.child).init(self.allocator);
                         var li = self.cursor.readL() orelse return error.NoNextLine;
                         while (li.next()) |w| {
                             _ = w;
@@ -153,7 +153,7 @@ const Scanner = struct {
 pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(T) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    var scanner = Scanner.init(&arena, input);
+    var scanner = Scanner.init(arena.allocator(), input);
     const v = try scanner.scan(T);
     return Parsed(T).init(arena, v);
 }
@@ -172,10 +172,14 @@ pub const Composed = struct {
 };
 
 const Accumulator = struct {
-    dest: []const u8,
+    extended_size: usize,
+    dest: ArrayList(u8),
 
-    fn init(buf: []const u8) Accumulator {
-        return .{ .dest = buf };
+    fn init(allocator: Allocator, extended_size: usize) !Accumulator {
+        return .{
+            .extended_size = extended_size,
+            .dest = try ArrayList(u8).initCapacity(allocator, extended_size),
+        };
     }
 
     fn writeW(v: []const u8) !void {
@@ -188,12 +192,14 @@ const Accumulator = struct {
 };
 
 const Printer = struct {
-    arena: *std.heap.ArenaAllocator,
+    allocator: Allocator,
     acc: Accumulator,
 
-    fn init(arena: *std.heap.ArenaAllocator) !Printer {
-        var buf = try arena.allocator().alloc(u8, 1024 * 4);
-        return .{ .arena = arena, .acc = Accumulator.init(buf) };
+    fn init(allocator: Allocator) !Printer {
+        return .{
+            .allocator = allocator,
+            .acc = try Accumulator.init(allocator, 4096),
+        };
     }
 
     fn print(self: *Printer, comptime T: type, value: T) !void {
@@ -216,9 +222,10 @@ const Printer = struct {
 
 pub fn compose(comptime T: type, allocator: Allocator, output: T) !Composed {
     var arena = ArenaAllocator.init(allocator);
-    var printer = try Printer.init(&arena);
+    var printer = try Printer.init(arena.allocator());
     try printer.print(T, output);
-    return Composed.init(arena, printer.acc.dest);
+    const value = printer.acc.dest.toOwnedSlice();
+    return Composed.init(arena, value);
 }
 
 test "read next one" {
