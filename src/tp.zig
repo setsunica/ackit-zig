@@ -172,22 +172,32 @@ pub const Composed = struct {
 };
 
 const Accumulator = struct {
-    extended_size: usize,
+    is_head_line: bool,
     dest: ArrayList(u8),
 
-    fn init(allocator: Allocator, extended_size: usize) !Accumulator {
+    fn init(allocator: Allocator, num: usize) !Accumulator {
         return .{
-            .extended_size = extended_size,
-            .dest = try ArrayList(u8).initCapacity(allocator, extended_size),
+            .is_head_line = true,
+            .dest = try ArrayList(u8).initCapacity(allocator, num),
         };
     }
 
-    fn writeW(v: []const u8) !void {
-        _ = v;
+    fn writeW(self: *Accumulator, v: []const u8) !void {
+        if (self.is_head_line) {
+            try self.dest.appendSlice(v);
+        } else {
+            try self.dest.writer().print("{s}{s}", .{ w_token, v });
+        }
+        self.is_head_line = false;
     }
 
-    fn writeL(v: []const u8) !void {
-        _ = v;
+    fn writeL(self: *Accumulator, v: []const u8) !void {
+        if (self.is_head_line) {
+            try self.dest.writer().print("{s}{s}", .{ v, l_token });
+        } else {
+            try self.dest.writer().print("{s}{s}{s}", .{ l_token, v, l_token });
+        }
+        self.is_head_line = true;
     }
 };
 
@@ -228,7 +238,7 @@ pub fn compose(comptime T: type, allocator: Allocator, output: T) !Composed {
     return Composed.init(arena, value);
 }
 
-test "read next one" {
+test "read words" {
     const s =
         \\11 12
         \\13.5
@@ -245,7 +255,7 @@ test "read next one" {
     try testing.expectEqualStrings("z", cursor.readW().?);
 }
 
-test "read next line" {
+test "read lines" {
     const s =
         \\11 12
         \\13.5
@@ -300,9 +310,41 @@ test "parse custom input" {
     try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
 }
 
+test "write words" {
+    const allocator = testing.allocator;
+    var acc = try Accumulator.init(allocator, 4096);
+    defer acc.dest.deinit();
+    try acc.writeW("1");
+    try acc.writeW("2.0");
+    try acc.writeW("a");
+    try testing.expectEqualStrings("1 2.0 a", acc.dest.items);
+}
+
+test "write lines" {
+    const allocator = testing.allocator;
+    var acc = try Accumulator.init(allocator, 4096);
+    defer acc.dest.deinit();
+    try acc.writeL("1 2");
+    try acc.writeL("3.3");
+    try acc.writeL("a b c");
+    try acc.writeL("def ghi jkl");
+    try testing.expectEqualStrings("1 2\n3.3\na b c\ndef ghi jkl\n", acc.dest.items);
+}
+
+test "write lines after word" {
+    const allocator = testing.allocator;
+    var acc = try Accumulator.init(allocator, 4096);
+    defer acc.dest.deinit();
+    try acc.writeW("1");
+    try acc.writeL("2.0 3.3");
+    try acc.writeW("abc");
+    try acc.writeL("def ghi jkl");
+    try testing.expectEqualStrings("1\n2.0 3.3\nabc\ndef ghi jkl\n", acc.dest.items);
+}
+
 test "compose custom output" {
     const a: []const u8 = "abc";
-    const allocator = std.testing.allocator;
+    const allocator = testing.allocator;
     const composed = try compose([]const u8, allocator, a);
     defer composed.deinit();
     try testing.expectEqualStrings("abc", composed.value);
