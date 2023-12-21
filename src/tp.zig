@@ -418,7 +418,7 @@ test "compose custom output" {
     ;
     const A = struct { c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
     var sa: [10]u8 = ("9" ** 10)[0..].*;
-    const a: A = .{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .sa = sa };
+    const a = A{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .sa = sa };
     const allocator = testing.allocator;
     const composed = try compose(A, allocator, a);
     defer composed.deinit();
