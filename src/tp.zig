@@ -70,27 +70,18 @@ const Cursor = struct {
 };
 
 const Scanner = struct {
-    allocator: Allocator,
+    arena: ArenaAllocator,
     cursor: Cursor,
 
-    fn init(allocator: Allocator, source: []const u8) Scanner {
+    fn init(arena: ArenaAllocator, source: []const u8) Scanner {
         return .{
-            .allocator = allocator,
+            .arena = arena,
             .cursor = Cursor.init(source),
         };
     }
 
     fn scan(self: *Scanner, comptime T: type) !T {
         switch (@typeInfo(T)) {
-            .Bool => {
-                const w = self.cursor.readW() orelse return error.NoNextWord;
-                return if (std.mem.eql(u8, w, "true"))
-                    true
-                else if (std.mem.eql(u8, w, "false"))
-                    false
-                else
-                    error.ParseBoolError;
-            },
             .Int => |i| {
                 const w = self.cursor.readW() orelse return error.NoNextWord;
                 return if (i.bits == 8 and i.signedness == .unsigned)
@@ -108,10 +99,9 @@ const Scanner = struct {
                         if (p.child == u8) {
                             return self.cursor.readW() orelse return error.NoNextWord;
                         }
-                        var arr = ArrayList(p.child).init(self.allocator);
+                        var arr = ArrayList(p.child).init(self.arena);
                         var li = self.cursor.readL() orelse return error.NoNextLine;
-                        while (li.next()) |w| {
-                            _ = w;
+                        while (li.next()) |_| {
                             const v = try self.scan(p.child);
                             try arr.append(v);
                         }
@@ -153,7 +143,7 @@ const Scanner = struct {
 pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(T) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    var scanner = Scanner.init(arena.allocator(), input);
+    var scanner = Scanner.init(arena, input);
     const v = try scanner.scan(T);
     return Parsed(T).init(arena, v);
 }
@@ -172,58 +162,130 @@ pub const Composed = struct {
 };
 
 const Accumulator = struct {
+    allocator: Allocator,
     is_head_line: bool,
-    dest: ArrayList(u8),
+    current_line: usize,
+    dest: ArrayList(ArrayList([]const u8)),
 
-    fn init(allocator: Allocator, num: usize) !Accumulator {
+    fn init(allocator: Allocator) !Accumulator {
         return .{
+            .allocator = allocator,
             .is_head_line = true,
-            .dest = try ArrayList(u8).initCapacity(allocator, num),
+            .current_line = 0,
+            .dest = ArrayList(ArrayList([]const u8)).init(allocator),
         };
+    }
+
+    fn deinit(self: Accumulator) void {
+        for (self.dest.items) |l| {
+            l.deinit();
+        }
+        self.dest.deinit();
     }
 
     fn writeW(self: *Accumulator, v: []const u8) !void {
         if (self.is_head_line) {
-            try self.dest.appendSlice(v);
+            var arr = ArrayList([]const u8).init(self.allocator);
+            try arr.append(v);
+            try self.dest.append(arr);
         } else {
-            try self.dest.writer().print("{s}{s}", .{ w_token, v });
+            try self.dest.items[self.current_line].append(v);
         }
         self.is_head_line = false;
     }
 
     fn writeL(self: *Accumulator, v: []const u8) !void {
         if (self.is_head_line) {
-            try self.dest.writer().print("{s}{s}", .{ v, l_token });
+            var arr = ArrayList([]const u8).init(self.allocator);
+            try arr.append(v);
+            try self.dest.append(arr);
         } else {
-            try self.dest.writer().print("{s}{s}{s}", .{ l_token, v, l_token });
+            try self.dest.items[self.current_line].append(v);
         }
+        self.current_line += 1;
         self.is_head_line = true;
+    }
+
+    fn newLine(self: *Accumulator) !void {
+        if (self.is_head_line) {
+            var arr = ArrayList([]const u8).init(self.allocator);
+            try self.dest.append(arr);
+        }
+        self.current_line += 1;
+        self.is_head_line = true;
+    }
+
+    fn toOwnedSlice(self: *Accumulator) ![]u8 {
+        var lines = try self.allocator.alloc([]const u8, self.dest.items.len);
+        defer self.allocator.free(lines);
+        var i: usize = 0;
+        while (i < lines.len) : (i += 1) {
+            const line = try std.mem.join(self.allocator, w_token, self.dest.items[i].items);
+            lines[i] = line;
+        }
+        const r = try std.mem.join(self.allocator, l_token, lines);
+        for (lines) |l| {
+            self.allocator.free(l);
+        }
+        return r;
     }
 };
 
 const Printer = struct {
-    allocator: Allocator,
+    arena: *ArenaAllocator,
     acc: Accumulator,
 
-    fn init(allocator: Allocator) !Printer {
+    fn init(arena: *ArenaAllocator) !Printer {
+        const allocator = arena.allocator();
         return .{
-            .allocator = allocator,
-            .acc = try Accumulator.init(allocator, 4096),
+            .arena = arena,
+            .acc = try Accumulator.init(allocator),
         };
     }
 
+    fn deinit(self: Printer) void {
+        self.acc.deinit();
+    }
+
     fn print(self: *Printer, comptime T: type, value: T) !void {
-        _ = value;
-        _ = self;
         switch (@typeInfo(T)) {
-            .Bool, .Int, .Float => {
-                // TODO: Implement string accumulation.
+            .Int => |i| {
+                if (i.bits == 8 and i.signedness == .unsigned) {
+                    const c = [_]u8{value};
+                    try self.acc.writeW(&c);
+                } else {
+                    try self.acc.writeW(try std.fmt.allocPrint(self.arena.allocator(), "{d}", .{value}));
+                }
             },
+            .Float => try self.acc.writeW(try std.fmt.allocPrint(self.arena.allocator(), "{d}", .{value})),
             .Pointer => |p| switch (p.size) {
-                .Slice => if (p.child == u8) {
-                    // TODO: Implement string accumulation.
+                .Slice => {
+                    if (p.child == u8) {
+                        try self.acc.writeL(value);
+                    } else {
+                        for (value) |v| {
+                            try self.print(p.child, v);
+                        }
+                    }
                 },
                 else => @compileError("invalid type, non-slice pointers are not supported"),
+            },
+            .Array => |a| {
+                if (a.child == u8) {
+                    try self.acc.writeL(value[0..]);
+                } else {
+                    for (value) |v| {
+                        try self.print(a.child, v);
+                    }
+                }
+            },
+            .Struct => |s| {
+                comptime var i: usize = 0;
+                inline while (i < s.fields.len) : (i += 1) {
+                    const field = s.fields[i];
+                    try self.print(field.field_type, @field(value, field.name));
+                    try self.acc.newLine();
+                }
             },
             else => @compileError("unsupported types for composing"),
         }
@@ -232,9 +294,11 @@ const Printer = struct {
 
 pub fn compose(comptime T: type, allocator: Allocator, output: T) !Composed {
     var arena = ArenaAllocator.init(allocator);
-    var printer = try Printer.init(arena.allocator());
+    errdefer arena.deinit();
+    var printer = try Printer.init(&arena);
+    defer printer.deinit();
     try printer.print(T, output);
-    const value = printer.acc.dest.toOwnedSlice();
+    const value = try printer.acc.toOwnedSlice();
     return Composed.init(arena, value);
 }
 
@@ -288,8 +352,6 @@ test "read rest" {
 
 test "parse custom input" {
     const s =
-        \\true
-        \\false
         \\a
         \\-10
         \\12.3
@@ -297,12 +359,10 @@ test "parse custom input" {
         \\defghijklm
         \\ghi
     ;
-    const A = struct { bt: bool, bf: bool, c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
+    const A = struct { c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
     var allocator = testing.allocator;
     var parsed = try parse(A, allocator, s);
     defer parsed.deinit();
-    try testing.expectEqual(true, parsed.value.bt);
-    try testing.expectEqual(false, parsed.value.bf);
     try testing.expectEqual(@as(u8, 'a'), parsed.value.c);
     try testing.expectEqual(@as(i32, -10), parsed.value.i);
     try testing.expectEqual(@as(f64, 12.3), parsed.value.f);
@@ -312,40 +372,55 @@ test "parse custom input" {
 
 test "write words" {
     const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator, 4096);
-    defer acc.dest.deinit();
+    var acc = try Accumulator.init(allocator);
+    defer acc.deinit();
     try acc.writeW("1");
     try acc.writeW("2.0");
     try acc.writeW("a");
-    try testing.expectEqualStrings("1 2.0 a", acc.dest.items);
+    const actual = try acc.toOwnedSlice();
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("1 2.0 a", actual);
 }
 
 test "write lines" {
     const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator, 4096);
-    defer acc.dest.deinit();
+    var acc = try Accumulator.init(allocator);
+    defer acc.deinit();
     try acc.writeL("1 2");
     try acc.writeL("3.3");
     try acc.writeL("a b c");
     try acc.writeL("def ghi jkl");
-    try testing.expectEqualStrings("1 2\n3.3\na b c\ndef ghi jkl\n", acc.dest.items);
+    const actual = try acc.toOwnedSlice();
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("1 2\n3.3\na b c\ndef ghi jkl", actual);
 }
 
 test "write lines after word" {
     const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator, 4096);
-    defer acc.dest.deinit();
+    var acc = try Accumulator.init(allocator);
+    defer acc.deinit();
     try acc.writeW("1");
     try acc.writeL("2.0 3.3");
     try acc.writeW("abc");
     try acc.writeL("def ghi jkl");
-    try testing.expectEqualStrings("1\n2.0 3.3\nabc\ndef ghi jkl\n", acc.dest.items);
+    var actual = try acc.toOwnedSlice();
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("1 2.0 3.3\nabc def ghi jkl", actual);
 }
 
 test "compose custom output" {
-    const a: []const u8 = "abc";
+    const expected =
+        \\c
+        \\-1
+        \\2.3
+        \\abc
+        \\9999999999
+    ;
+    const A = struct { c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
+    var sa: [10]u8 = ("9" ** 10)[0..].*;
+    const a: A = .{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .sa = sa };
     const allocator = testing.allocator;
-    const composed = try compose([]const u8, allocator, a);
+    const composed = try compose(A, allocator, a);
     defer composed.deinit();
-    try testing.expectEqualStrings("abc", composed.value);
+    try testing.expectEqualStrings(expected, composed.value);
 }
