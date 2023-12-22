@@ -148,158 +148,79 @@ pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(
     return Parsed(T).init(arena, v);
 }
 
-pub const Composed = struct {
-    arena: ArenaAllocator,
-    value: []const u8,
+fn Printer(comptime Writer: type) type {
+    return struct {
+        const Self = @This();
+        writer: Writer,
 
-    fn init(arena: ArenaAllocator, value: []const u8) Composed {
-        return .{ .arena = arena, .value = value };
-    }
-
-    pub fn deinit(self: Composed) void {
-        self.arena.deinit();
-    }
-};
-
-const Accumulator = struct {
-    allocator: Allocator,
-    is_head_line: bool,
-    current_line: usize,
-    dest: ArrayList(ArrayList([]const u8)),
-
-    fn init(allocator: Allocator) !Accumulator {
-        return .{
-            .allocator = allocator,
-            .is_head_line = true,
-            .current_line = 0,
-            .dest = ArrayList(ArrayList([]const u8)).init(allocator),
-        };
-    }
-
-    fn deinit(self: Accumulator) void {
-        for (self.dest.items) |l| {
-            l.deinit();
+        fn init(writer: Writer) Printer(Writer) {
+            return .{ .writer = writer };
         }
-        self.dest.deinit();
-    }
 
-    fn writeW(self: *Accumulator, v: []const u8) !void {
-        if (self.is_head_line) {
-            var arr = ArrayList([]const u8).init(self.allocator);
-            try arr.append(v);
-            try self.dest.append(arr);
-        } else {
-            try self.dest.items[self.current_line].append(v);
-        }
-        self.is_head_line = false;
-    }
-
-    fn writeL(self: *Accumulator, v: []const u8) !void {
-        if (self.is_head_line) {
-            var arr = ArrayList([]const u8).init(self.allocator);
-            try arr.append(v);
-            try self.dest.append(arr);
-        } else {
-            try self.dest.items[self.current_line].append(v);
-        }
-        self.current_line += 1;
-        self.is_head_line = true;
-    }
-
-    fn newLine(self: *Accumulator) !void {
-        if (self.is_head_line) {
-            var arr = ArrayList([]const u8).init(self.allocator);
-            try self.dest.append(arr);
-        }
-        self.current_line += 1;
-        self.is_head_line = true;
-    }
-
-    fn toOwnedSlice(self: *Accumulator) ![]u8 {
-        var lines = try self.allocator.alloc([]const u8, self.dest.items.len);
-        defer self.allocator.free(lines);
-        var i: usize = 0;
-        while (i < lines.len) : (i += 1) {
-            const line = try std.mem.join(self.allocator, w_token, self.dest.items[i].items);
-            lines[i] = line;
-        }
-        const r = try std.mem.join(self.allocator, l_token, lines);
-        for (lines) |l| {
-            self.allocator.free(l);
-        }
-        return r;
-    }
-};
-
-const Printer = struct {
-    arena: *ArenaAllocator,
-    acc: Accumulator,
-
-    fn init(arena: *ArenaAllocator) !Printer {
-        const allocator = arena.allocator();
-        return .{
-            .arena = arena,
-            .acc = try Accumulator.init(allocator),
-        };
-    }
-
-    fn deinit(self: Printer) void {
-        self.acc.deinit();
-    }
-
-    fn print(self: *Printer, comptime T: type, value: T) !void {
-        switch (@typeInfo(T)) {
-            .Int => |i| {
-                if (i.bits == 8 and i.signedness == .unsigned) {
-                    const c = [_]u8{value};
-                    try self.acc.writeW(&c);
-                } else {
-                    try self.acc.writeW(try std.fmt.allocPrint(self.arena.allocator(), "{d}", .{value}));
-                }
-            },
-            .Float => try self.acc.writeW(try std.fmt.allocPrint(self.arena.allocator(), "{d}", .{value})),
-            .Pointer => |p| switch (p.size) {
-                .Slice => {
-                    if (p.child == u8) {
-                        try self.acc.writeL(value);
+        fn print(self: *Self, comptime T: type, value: T) !void {
+            switch (@typeInfo(T)) {
+                .Int => |i| {
+                    if (i.bits == 8 and i.signedness == .unsigned) {
+                        _ = try self.writer.writeByte(value);
                     } else {
-                        for (value) |v| {
-                            try self.print(p.child, v);
-                        }
+                        try self.writer.print("{d}", .{value});
                     }
                 },
-                else => @compileError("invalid type, non-slice pointers are not supported"),
-            },
-            .Array => |a| {
-                if (a.child == u8) {
-                    try self.acc.writeL(value[0..]);
-                } else {
-                    for (value) |v| {
-                        try self.print(a.child, v);
+                .Float => try self.writer.print("{d}", .{value}),
+                .Pointer => |p| switch (p.size) {
+                    .Slice => {
+                        switch (@typeInfo(p.child)) {
+                            .Pointer => |pp| {
+                                if (pp.size == .Slice)
+                                    try self.printLines(p.child, value)
+                                else
+                                    @compileError("invalid type, non-slice pointers are not supported");
+                            },
+                            .Array => try self.printLines(p.child, value[0..]),
+                            else => if (p.child == u8)
+                                try self.writer.print("{s}", .{value})
+                            else
+                                try self.printWords(p.child, value),
+                        }
+                    },
+                    else => @compileError("invalid type, non-slice pointers are not supported"),
+                },
+                .Array => |a| try self.print([]const a.child, value[0..]),
+                .Struct => |s| {
+                    comptime var i: usize = 0;
+                    inline while (i < s.fields.len) : (i += 1) {
+                        const field = s.fields[i];
+                        try self.print(field.field_type, @field(value, field.name));
+                        _ = try self.writer.write(l_token);
                     }
-                }
-            },
-            .Struct => |s| {
-                comptime var i: usize = 0;
-                inline while (i < s.fields.len) : (i += 1) {
-                    const field = s.fields[i];
-                    try self.print(field.field_type, @field(value, field.name));
-                    try self.acc.newLine();
-                }
-            },
-            else => @compileError("unsupported types for composing"),
+                },
+                else => @compileError(@typeName(T) ++ " is an unsupported type for composing"),
+            }
         }
-    }
-};
 
-pub fn compose(comptime T: type, allocator: Allocator, output: T) !Composed {
-    var arena = ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-    var printer = try Printer.init(&arena);
-    defer printer.deinit();
+        fn printChildren(self: *Self, comptime Child: type, value: []const Child, sep: []const u8) !void {
+            var i: usize = 0;
+            while (i < value.len) : (i += 1) {
+                try self.print(Child, value[i]);
+                if (i != value.len) {
+                    try self.writer.write(sep);
+                }
+            }
+        }
+
+        inline fn printWords(self: *Self, comptime Child: type, value: []const Child) !void {
+            try self.printChildren(Child, value, w_token);
+        }
+
+        inline fn printLines(self: *Self, comptime Child: type, value: []const Child) !void {
+            try self.printChildren(Child, value, l_token);
+        }
+    };
+}
+
+pub fn compose(comptime T: type, comptime Writer: type, output: T, writer: Writer) !void {
+    var printer = Printer(Writer).init(writer);
     try printer.print(T, output);
-    const value = try printer.acc.toOwnedSlice();
-    return Composed.init(arena, value);
 }
 
 test "read words" {
@@ -370,57 +291,25 @@ test "parse custom input" {
     try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
 }
 
-test "write words" {
-    const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator);
-    defer acc.deinit();
-    try acc.writeW("1");
-    try acc.writeW("2.0");
-    try acc.writeW("a");
-    const actual = try acc.toOwnedSlice();
-    defer allocator.free(actual);
-    try testing.expectEqualStrings("1 2.0 a", actual);
-}
-
-test "write lines" {
-    const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator);
-    defer acc.deinit();
-    try acc.writeL("1 2");
-    try acc.writeL("3.3");
-    try acc.writeL("a b c");
-    try acc.writeL("def ghi jkl");
-    const actual = try acc.toOwnedSlice();
-    defer allocator.free(actual);
-    try testing.expectEqualStrings("1 2\n3.3\na b c\ndef ghi jkl", actual);
-}
-
-test "write lines after word" {
-    const allocator = testing.allocator;
-    var acc = try Accumulator.init(allocator);
-    defer acc.deinit();
-    try acc.writeW("1");
-    try acc.writeL("2.0 3.3");
-    try acc.writeW("abc");
-    try acc.writeL("def ghi jkl");
-    var actual = try acc.toOwnedSlice();
-    defer allocator.free(actual);
-    try testing.expectEqualStrings("1 2.0 3.3\nabc def ghi jkl", actual);
-}
-
 test "compose custom output" {
     const expected =
         \\c
         \\-1
         \\2.3
         \\abc
-        \\9999999999
+        \\0123456789
+        \\
     ;
-    const A = struct { c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
-    var sa: [10]u8 = ("9" ** 10)[0..].*;
-    const a = A{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .sa = sa };
-    const allocator = testing.allocator;
-    const composed = try compose(A, allocator, a);
-    defer composed.deinit();
-    try testing.expectEqualStrings(expected, composed.value);
+    const Output = struct { c: u8, i: i32, f: f64, s: []const u8, a: [10]u8 };
+    var a: [10]u8 = undefined;
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        a[i] = @intCast(u8, i) + '0';
+    }
+    const o = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a };
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    var writer = stream.writer();
+    try compose(Output, @TypeOf(writer), o, writer);
+    try testing.expectEqualStrings(expected, stream.getWritten());
 }
