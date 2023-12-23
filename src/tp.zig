@@ -1,11 +1,10 @@
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
-const builtin = std.builtin;
-const StructField = builtin.Type.StructField;
+const Allocator = std.mem.Allocator;
 const TokenIterator = std.mem.TokenIterator;
-const Type = builtin.Type;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const StructField = std.builtin.Type.StructField;
+const Type = std.builtin.Type;
 const testing = std.testing;
 
 const ScanError = error{
@@ -67,13 +66,23 @@ const Cursor = struct {
             break :blk ws;
         } else null;
     }
+
+    fn countRestW(self: *Cursor) usize {
+        if (self.w_iter.peek() == null) {
+            const l = self.l_iter.next() orelse return 0;
+            self.w_iter = std.mem.tokenize(u8, l, w_token);
+        }
+        const rest = self.w_iter.rest();
+        if (rest.len == 0) return 0;
+        return std.mem.count(u8, rest, w_token) + 1;
+    }
 };
 
 const Scanner = struct {
-    arena: ArenaAllocator,
+    arena: *ArenaAllocator,
     cursor: Cursor,
 
-    fn init(arena: ArenaAllocator, source: []const u8) Scanner {
+    fn init(arena: *ArenaAllocator, source: []const u8) Scanner {
         return .{
             .arena = arena,
             .cursor = Cursor.init(source),
@@ -81,83 +90,103 @@ const Scanner = struct {
     }
 
     fn scan(self: *Scanner, comptime T: type) !T {
-        switch (@typeInfo(T)) {
-            .Int => |i| {
+        return switch (@typeInfo(T)) {
+            .Int => |i| blk: {
                 const w = self.cursor.readW() orelse return error.NoNextWord;
-                return if (i.bits == 8 and i.signedness == .unsigned)
+                break :blk if (i.bits == 8 and i.signedness == .unsigned)
                     w[0]
                 else
                     std.fmt.parseInt(@Type(.{ .Int = i }), w, 10);
             },
-            .Float => |f| {
+            .Float => |f| blk: {
                 const w = self.cursor.readW() orelse return error.NoNextWord;
-                return try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
+                break :blk try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
             },
-            .Pointer => |p| {
-                switch (p.size) {
-                    .Slice => {
-                        if (p.child == u8) {
-                            return self.cursor.readW() orelse return error.NoNextWord;
-                        }
-                        var arr = ArrayList(p.child).init(self.arena);
-                        var li = self.cursor.readL() orelse return error.NoNextLine;
-                        while (li.next()) |_| {
-                            const v = try self.scan(p.child);
-                            try arr.append(v);
-                        }
-                        return try arr.toOwnedSlice();
-                    },
-                    else => @compileError("invalid type, non-slice pointers are not supported"),
-                }
+            .Pointer => |p| blk: {
+                if (p.size != .Slice) @compileError("invalid type, non-slice pointers are not supported");
+                if (p.child == u8) return self.cursor.readW() orelse return error.NoNextWord;
+                break :blk switch (@typeInfo(p.child)) {
+                    .Pointer => |pp| if (pp.size == .Slice)
+                        try self.scanLs(pp.child)
+                    else
+                        @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported"),
+                    .Array => try self.scanArray(T),
+                    else => try self.scanWs(p.child) orelse error.NoNextLine,
+                };
             },
-            .Array => |a| {
-                if (a.child == u8) {
-                    const s = (self.cursor.readW() orelse return error.NoNextWord);
-                    if (s.len < a.len) {
-                        return error.InvalidArraySize;
-                    }
-                    return s[0..a.len].*;
-                }
-                var r: [a.len]a.child = undefined;
-                comptime var i: usize = 0;
-                inline while (i < a.len) : (i += 1) {
-                    const v = try self.scan(a.child);
-                    r[i] = v;
-                }
-                return r;
-            },
-            .Struct => |s| {
+            .Array => try self.scanArray(T),
+            .Struct => |s| blk: {
                 var v: T = undefined;
                 comptime var i: usize = 0;
                 inline while (i < s.fields.len) : (i += 1) {
                     const field = s.fields[i];
                     @field(v, field.name) = try self.scan(field.field_type);
                 }
-                return v;
+                break :blk v;
             },
             else => @compileError("unsupported types for parsing"),
+        };
+    }
+
+    fn scanWs(self: *Scanner, comptime Child: type) !?[]Child {
+        const restCount = self.cursor.countRestW();
+        if (restCount == 0) return null;
+        var arr = ArrayList(Child).init(self.arena.allocator());
+        var i: usize = 0;
+        while (i < restCount) : (i += 1) {
+            const v = try self.scan(Child);
+            try arr.append(v);
         }
+        return arr.toOwnedSlice();
+    }
+
+    fn scanLs(self: *Scanner, comptime Child: type) ![][]Child {
+        var arr = ArrayList([]Child).init(self.arena.allocator());
+        while (try self.scanWs(Child)) |vs| {
+            try arr.append(vs);
+        }
+        return arr.toOwnedSlice();
+    }
+
+    fn scanArray(self: *Scanner, comptime Array: type) !Array {
+        const a = @typeInfo(Array).Array;
+        if (a.child == u8) {
+            const s = (self.cursor.readW() orelse return error.NoNextWord);
+            if (s.len < a.len) {
+                return error.InvalidArraySize;
+            }
+            return s[0..a.len].*;
+        }
+        var r: [a.len]a.child = undefined;
+        comptime var i: usize = 0;
+        inline while (i < a.len) : (i += 1) {
+            const v = try self.scan(a.child);
+            r[i] = v;
+        }
+        return r;
     }
 };
 
-pub fn parse(comptime T: type, allocator: Allocator, input: []const u8) !Parsed(T) {
+pub fn parse(comptime T: type, allocator: Allocator, reader: anytype, max_size: usize) !Parsed(T) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    var scanner = Scanner.init(arena, input);
+    const source = try reader.readAllAlloc(arena.allocator(), max_size);
+    var scanner = Scanner.init(&arena, source);
     const v = try scanner.scan(T);
     return Parsed(T).init(arena, v);
 }
 
-fn Printer(comptime Writer: type) type {
+fn Printer(comptime WriterType: type) type {
     return struct {
         const Self = @This();
-        writer: Writer,
+        writer: WriterType,
 
-        fn init(writer: Writer) Printer(Writer) {
+        fn init(writer: WriterType) Printer(WriterType) {
             return .{ .writer = writer };
         }
 
-        fn print(self: *Self, comptime T: type, value: T) !void {
+        fn print(self: *Self, value: anytype) !void {
+            const T = @TypeOf(value);
             switch (@typeInfo(T)) {
                 .Int => |i| {
                     if (i.bits == 8 and i.signedness == .unsigned) {
@@ -172,25 +201,25 @@ fn Printer(comptime Writer: type) type {
                         switch (@typeInfo(p.child)) {
                             .Pointer => |pp| {
                                 if (pp.size == .Slice)
-                                    try self.printLines(p.child, value)
+                                    try self.printLs(p.child, value)
                                 else
                                     @compileError("invalid type, non-slice pointers are not supported");
                             },
-                            .Array => try self.printLines(p.child, value[0..]),
+                            .Array => try self.printLs(p.child, value[0..]),
                             else => if (p.child == u8)
                                 try self.writer.print("{s}", .{value})
                             else
-                                try self.printWords(p.child, value),
+                                try self.printWs(p.child, value),
                         }
                     },
                     else => @compileError("invalid type, non-slice pointers are not supported"),
                 },
-                .Array => |a| try self.print([]const a.child, value[0..]),
+                .Array => |a| try self.print(@as([]const a.child, value[0..])),
                 .Struct => |s| {
                     comptime var i: usize = 0;
                     inline while (i < s.fields.len) : (i += 1) {
                         const field = s.fields[i];
-                        try self.print(field.field_type, @field(value, field.name));
+                        try self.print(@field(value, field.name));
                         _ = try self.writer.write(l_token);
                     }
                 },
@@ -201,26 +230,26 @@ fn Printer(comptime Writer: type) type {
         fn printChildren(self: *Self, comptime Child: type, value: []const Child, sep: []const u8) !void {
             var i: usize = 0;
             while (i < value.len) : (i += 1) {
-                try self.print(Child, value[i]);
-                if (i != value.len) {
-                    try self.writer.write(sep);
+                try self.print(value[i]);
+                if (i != value.len - 1) {
+                    _ = try self.writer.write(sep);
                 }
             }
         }
 
-        inline fn printWords(self: *Self, comptime Child: type, value: []const Child) !void {
+        inline fn printWs(self: *Self, comptime Child: type, value: []const Child) !void {
             try self.printChildren(Child, value, w_token);
         }
 
-        inline fn printLines(self: *Self, comptime Child: type, value: []const Child) !void {
+        inline fn printLs(self: *Self, comptime Child: type, value: []const Child) !void {
             try self.printChildren(Child, value, l_token);
         }
     };
 }
 
-pub fn compose(comptime T: type, comptime Writer: type, output: T, writer: Writer) !void {
-    var printer = Printer(Writer).init(writer);
-    try printer.print(T, output);
+pub fn compose(writer: anytype, output: anytype) !void {
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
 }
 
 test "read words" {
@@ -277,18 +306,37 @@ test "parse custom input" {
         \\-10
         \\12.3
         \\abc
+        \\-11 22 33.3
         \\defghijklm
-        \\ghi
+        \\1 2 3
+        \\4 5 6
+        \\7 8 9
+        \\
     ;
-    const A = struct { c: u8, i: i32, f: f64, s: []const u8, sa: [10]u8 };
+    const A = struct {
+        c: u8,
+        i: i32,
+        f: f64,
+        s: []const u8,
+        t: struct { i: i32, u: u32, f: f64 },
+        sa: [10]u8,
+        s2: [][]i32,
+    };
     var allocator = testing.allocator;
-    var parsed = try parse(A, allocator, s);
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(A, allocator, stream.reader(), 4092);
+    const s2: []const []const i32 = &.{ &.{ 1, 2, 3 }, &.{ 4, 5, 6 }, &.{ 7, 8, 9 } };
     defer parsed.deinit();
     try testing.expectEqual(@as(u8, 'a'), parsed.value.c);
     try testing.expectEqual(@as(i32, -10), parsed.value.i);
     try testing.expectEqual(@as(f64, 12.3), parsed.value.f);
     try testing.expectEqualStrings("abc", parsed.value.s);
+    try testing.expectEqual(parsed.value.t, .{ .i = -11, .u = 22, .f = 33.3 });
     try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
+    var i: usize = 0;
+    while (i < s2.len) : (i += 1) {
+        try testing.expectEqualSlices(i32, s2[i], parsed.value.s2[i]);
+    }
 }
 
 test "compose custom output" {
@@ -298,18 +346,32 @@ test "compose custom output" {
         \\2.3
         \\abc
         \\0123456789
+        \\1 2 3
+        \\4 5 6
+        \\7 8 9
         \\
     ;
-    const Output = struct { c: u8, i: i32, f: f64, s: []const u8, a: [10]u8 };
+    const Output = struct {
+        c: u8,
+        i: i32,
+        f: f64,
+        s: []const u8,
+        a: [10]u8,
+        s2: []const []const i32,
+    };
     var a: [10]u8 = undefined;
     var i: usize = 0;
     while (i < a.len) : (i += 1) {
         a[i] = @intCast(u8, i) + '0';
     }
-    const o = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a };
+    var s2 = &.{
+        &.{ 1, 2, 3 },
+        &.{ 4, 5, 6 },
+        &.{ 7, 8, 9 },
+    };
+    const o = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a, .s2 = s2 };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    var writer = stream.writer();
-    try compose(Output, @TypeOf(writer), o, writer);
+    try compose(stream.writer(), o);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
