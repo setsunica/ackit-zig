@@ -103,13 +103,13 @@ const Scanner = struct {
                 break :blk try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
             },
             .Pointer => |p| blk: {
-                if (p.size != .Slice) @compileError("invalid type, non-slice pointers are not supported");
+                if (p.size != .Slice) @compileError("invalid type" ++ @typeName(T) ++ ", non-slice pointers are not supported for scanning");
                 if (p.child == u8) return self.cursor.readW() orelse return error.NoNextWord;
                 break :blk switch (@typeInfo(p.child)) {
                     .Pointer => |pp| if (pp.size == .Slice)
                         try self.scanLs(pp.child)
                     else
-                        @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported"),
+                        @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
                     .Array => try self.scanArrays(p.child),
                     else => try self.scanWs(p.child) orelse error.NoNextLine,
                 };
@@ -124,7 +124,7 @@ const Scanner = struct {
                 }
                 break :blk v;
             },
-            else => @compileError("unsupported types for parsing"),
+            else => @compileError("invalid type" ++ @typeName(T) ++ ", unsupported types for scanning"),
         };
     }
 
@@ -153,7 +153,7 @@ const Scanner = struct {
         if (restCount == 0) return null;
         const a = @typeInfo(Array).Array;
         if (a.child == u8) {
-            const s = (self.cursor.readW() orelse return error.NoNextWord);
+            const s = (self.cursor.readW().?);
             if (s.len < a.len) {
                 return error.InvalidArraySize;
             }
@@ -206,23 +206,21 @@ fn Printer(comptime WriterType: type) type {
                     }
                 },
                 .Float => try self.writer.print("{d}", .{value}),
-                .Pointer => |p| switch (p.size) {
-                    .Slice => {
-                        switch (@typeInfo(p.child)) {
-                            .Pointer => |pp| {
-                                if (pp.size == .Slice)
-                                    try self.printLs(p.child, value)
-                                else
-                                    @compileError("invalid type, non-slice pointers are not supported");
-                            },
-                            .Array => try self.printLs(p.child, value),
-                            else => if (p.child == u8)
-                                try self.writer.print("{s}", .{value})
+                .Pointer => |p| {
+                    if (p.size != .Slice) @compileError("invalid type" ++ @typeName(T) ++ ", non-slice pointers are not supported for printing");
+                    switch (@typeInfo(p.child)) {
+                        .Pointer => |pp| {
+                            if (pp.size == .Slice)
+                                try self.printLs(p.child, value)
                             else
-                                try self.printWs(p.child, value),
-                        }
-                    },
-                    else => @compileError("invalid type, non-slice pointers are not supported"),
+                                @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported for printing");
+                        },
+                        .Array => try self.printLs(p.child, value),
+                        else => if (p.child == u8)
+                            try self.writer.print("{s}", .{value})
+                        else
+                            try self.printWs(p.child, value),
+                    }
                 },
                 .Array => |a| try self.print(@as([]const a.child, &value)),
                 .Struct => |s| {
@@ -233,7 +231,7 @@ fn Printer(comptime WriterType: type) type {
                         _ = try self.writer.write(l_token);
                     }
                 },
-                else => @compileError(@typeName(T) ++ " is an unsupported type for composing"),
+                else => @compileError("invalid type" ++ @typeName(T) ++ ", unsupported types for printing"),
             }
         }
 
