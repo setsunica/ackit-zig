@@ -110,11 +110,11 @@ const Scanner = struct {
                         try self.scanLs(pp.child)
                     else
                         @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported"),
-                    .Array => try self.scanArray(T),
+                    .Array => try self.scanArrays(p.child),
                     else => try self.scanWs(p.child) orelse error.NoNextLine,
                 };
             },
-            .Array => try self.scanArray(T),
+            .Array => try self.scanArray(T) orelse error.NoNextWord,
             .Struct => |s| blk: {
                 var v: T = undefined;
                 comptime var i: usize = 0;
@@ -148,7 +148,9 @@ const Scanner = struct {
         return arr.toOwnedSlice();
     }
 
-    fn scanArray(self: *Scanner, comptime Array: type) !Array {
+    fn scanArray(self: *Scanner, comptime Array: type) !?Array {
+        const restCount = self.cursor.countRestW();
+        if (restCount == 0) return null;
         const a = @typeInfo(Array).Array;
         if (a.child == u8) {
             const s = (self.cursor.readW() orelse return error.NoNextWord);
@@ -158,12 +160,20 @@ const Scanner = struct {
             return s[0..a.len].*;
         }
         var r: [a.len]a.child = undefined;
-        comptime var i: usize = 0;
-        inline while (i < a.len) : (i += 1) {
+        var i: usize = 0;
+        while (i < a.len) : (i += 1) {
             const v = try self.scan(a.child);
             r[i] = v;
         }
         return r;
+    }
+
+    fn scanArrays(self: *Scanner, comptime Array: type) ![]Array {
+        var arrs = ArrayList(Array).init(self.arena.allocator());
+        while (try self.scanArray(Array)) |arr| {
+            try arrs.append(arr);
+        }
+        return arrs.toOwnedSlice();
     }
 };
 
@@ -205,7 +215,7 @@ fn Printer(comptime WriterType: type) type {
                                 else
                                     @compileError("invalid type, non-slice pointers are not supported");
                             },
-                            .Array => try self.printLs(p.child, value[0..]),
+                            .Array => try self.printLs(p.child, value),
                             else => if (p.child == u8)
                                 try self.writer.print("{s}", .{value})
                             else
@@ -214,7 +224,7 @@ fn Printer(comptime WriterType: type) type {
                     },
                     else => @compileError("invalid type, non-slice pointers are not supported"),
                 },
-                .Array => |a| try self.print(@as([]const a.child, value[0..])),
+                .Array => |a| try self.print(@as([]const a.child, &value)),
                 .Struct => |s| {
                     comptime var i: usize = 0;
                     inline while (i < s.fields.len) : (i += 1) {
@@ -301,6 +311,7 @@ test "read rest" {
 }
 
 test "parse custom input" {
+    var allocator = testing.allocator;
     const s =
         \\a
         \\-10
@@ -313,7 +324,7 @@ test "parse custom input" {
         \\7 8 9
         \\
     ;
-    const A = struct {
+    const Input = struct {
         c: u8,
         i: i32,
         f: f64,
@@ -322,10 +333,13 @@ test "parse custom input" {
         sa: [10]u8,
         s2: [][]i32,
     };
-    var allocator = testing.allocator;
     var stream = std.io.fixedBufferStream(s);
-    const parsed = try parse(A, allocator, stream.reader(), 4092);
-    const s2: []const []const i32 = &.{ &.{ 1, 2, 3 }, &.{ 4, 5, 6 }, &.{ 7, 8, 9 } };
+    const parsed = try parse(Input, allocator, stream.reader(), 4092);
+    const s2: []const []const i32 = &.{
+        &.{ 1, 2, 3 },
+        &.{ 4, 5, 6 },
+        &.{ 7, 8, 9 },
+    };
     defer parsed.deinit();
     try testing.expectEqual(@as(u8, 'a'), parsed.value.c);
     try testing.expectEqual(@as(i32, -10), parsed.value.i);
@@ -336,6 +350,75 @@ test "parse custom input" {
     var i: usize = 0;
     while (i < s2.len) : (i += 1) {
         try testing.expectEqualSlices(i32, s2[i], parsed.value.s2[i]);
+    }
+}
+
+test "parse 2d array" {
+    const allocator = testing.allocator;
+    const s =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Input = struct { a2: [3][3]i32 };
+    const a2: [3][3]i32 = .{
+        .{ 1, 2, 3 },
+        .{ -4, -5, -6 },
+        .{ 7, 8, 9 },
+    };
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(Input, allocator, stream.reader(), 4096);
+    defer parsed.deinit();
+    var i: usize = 0;
+    while (i < a2.len) : (i += 1) {
+        try testing.expectEqualSlices(i32, &a2[i], &parsed.value.a2[i]);
+    }
+}
+
+test "parse array slices" {
+    const allocator = testing.allocator;
+    const s =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Input = struct { a2: [][3]i32 };
+    const as: []const [3]i32 = &.{
+        .{ 1, 2, 3 },
+        .{ -4, -5, -6 },
+        .{ 7, 8, 9 },
+    };
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(Input, allocator, stream.reader(), 4096);
+    defer parsed.deinit();
+    var i: usize = 0;
+    while (i < as.len) : (i += 1) {
+        try testing.expectEqualSlices(i32, &as[i], &parsed.value.a2[i]);
+    }
+}
+
+test "parse slice arrays" {
+    const allocator = testing.allocator;
+    const s =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Input = struct { a2: [3][]i32 };
+    const as: [3][]const i32 = .{
+        &.{ 1, 2, 3 },
+        &.{ -4, -5, -6 },
+        &.{ 7, 8, 9 },
+    };
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(Input, allocator, stream.reader(), 4096);
+    defer parsed.deinit();
+    var i: usize = 0;
+    while (i < as.len) : (i += 1) {
+        try testing.expectEqualSlices(i32, as[i], parsed.value.a2[i]);
     }
 }
 
@@ -369,9 +452,75 @@ test "compose custom output" {
         &.{ 4, 5, 6 },
         &.{ 7, 8, 9 },
     };
-    const o = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a, .s2 = s2 };
+    const output = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a, .s2 = s2 };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try compose(stream.writer(), o);
+    try compose(stream.writer(), output);
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "compose 2d array" {
+    const expected =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Output = struct {
+        a2: [3][3]i32,
+    };
+    const a2 = .{
+        .{ 1, 2, 3 },
+        .{ -4, -5, -6 },
+        .{ 7, 8, 9 },
+    };
+    const output = Output{ .a2 = a2 };
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try compose(stream.writer(), output);
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "compose array slices" {
+    const expected =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Output = struct {
+        as: []const [3]i32,
+    };
+    const as = &.{
+        .{ 1, 2, 3 },
+        .{ -4, -5, -6 },
+        .{ 7, 8, 9 },
+    };
+    const output = Output{ .as = as };
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try compose(stream.writer(), output);
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "compose slice arrays" {
+    const expected =
+        \\1 2 3
+        \\-4 -5 -6
+        \\7 8 9
+        \\
+    ;
+    const Output = struct {
+        sa: [3][]const i32,
+    };
+    const sa = .{
+        &.{ 1, 2, 3 },
+        &.{ -4, -5, -6 },
+        &.{ 7, 8, 9 },
+    };
+    const output = Output{ .sa = sa };
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try compose(stream.writer(), output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
