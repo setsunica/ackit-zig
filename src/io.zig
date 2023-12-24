@@ -195,7 +195,7 @@ fn Printer(comptime WriterType: type) type {
             return .{ .writer = writer };
         }
 
-        fn print(self: *Self, value: anytype) !void {
+        pub fn print(self: *Self, value: anytype) WriterType.Error!void {
             const T = @TypeOf(value);
             switch (@typeInfo(T)) {
                 .Int => |i| {
@@ -260,19 +260,44 @@ fn compose(writer: anytype, output: anytype) !void {
     try printer.print(output);
 }
 
-pub fn interact(
+fn interact(
     comptime Input: type,
-    comptime Output: type,
     allocator: Allocator,
     reader: anytype,
     writer: anytype,
     input_max_size: usize,
-    solver: fn (Input) Output,
+    solver: fn (Input, *Printer(@TypeOf(writer))) std.os.WriteError!void,
 ) !void {
     const input = try parse(Input, allocator, reader, input_max_size);
     defer input.deinit();
-    const output = solver(input.value);
-    try compose(writer, output);
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try solver(input.value, &printer);
+}
+
+const StdOutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
+pub const StdOutPrinter = Printer(StdOutWriter);
+
+pub fn interactStdIO(
+    comptime InputType: type,
+    allocator: Allocator,
+    input_max_size: usize,
+    solver: fn (InputType, *StdOutPrinter) std.os.WriteError!void,
+) !void {
+    const stdin_file = std.io.getStdIn().reader();
+    const stdout_file = std.io.getStdOut().writer();
+    var br = std.io.bufferedReader(stdin_file);
+    var bw = std.io.bufferedWriter(stdout_file);
+    const stdin = br.reader();
+    const stdout = bw.writer();
+    try interact(
+        InputType,
+        allocator,
+        stdin,
+        stdout,
+        input_max_size,
+        solver,
+    );
+    try bw.flush();
 }
 
 test "read words" {
@@ -542,9 +567,11 @@ test "interact like an echo" {
     const allocator = testing.allocator;
     const Input = struct { s: []const u8 };
     const Output = struct { s: []const u8 };
+    _ = Output;
     const s = struct {
-        fn echo(input: Input) Output {
-            return .{ .s = input.s };
+        fn echo(input: Input, printer: *Printer(std.io.FixedBufferStream([]u8).Writer)) !void {
+            const output = .{ .s = input.s };
+            try printer.print(output);
         }
     };
     var input_buf = "Hello\n";
@@ -553,7 +580,6 @@ test "interact like an echo" {
     var output_stream = std.io.fixedBufferStream(&output_buf);
     try interact(
         Input,
-        Output,
         allocator,
         input_stream.reader(),
         output_stream.writer(),
