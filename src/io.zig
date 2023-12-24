@@ -261,14 +261,14 @@ fn compose(writer: anytype, output: anytype) !void {
 }
 
 fn interact(
-    comptime Input: type,
+    comptime InputType: type,
     allocator: Allocator,
     reader: anytype,
     writer: anytype,
     input_max_size: usize,
-    solver: fn (Input, *Printer(@TypeOf(writer))) std.os.WriteError!void,
+    solver: fn (InputType, *Printer(@TypeOf(writer))) std.os.WriteError!void,
 ) !void {
-    const input = try parse(Input, allocator, reader, input_max_size);
+    const input = try parse(InputType, allocator, reader, input_max_size);
     defer input.deinit();
     var printer = Printer(@TypeOf(writer)).init(writer);
     try solver(input.value, &printer);
