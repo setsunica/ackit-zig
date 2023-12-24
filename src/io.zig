@@ -13,7 +13,7 @@ const ScanError = error{
     InvalidArraySize,
 };
 
-pub fn Parsed(comptime T: type) type {
+fn Parsed(comptime T: type) type {
     return struct {
         arena: ArenaAllocator,
         value: T,
@@ -177,7 +177,7 @@ const Scanner = struct {
     }
 };
 
-pub fn parse(comptime T: type, allocator: Allocator, reader: anytype, max_size: usize) !Parsed(T) {
+fn parse(comptime T: type, allocator: Allocator, reader: anytype, max_size: usize) !Parsed(T) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const source = try reader.readAllAlloc(arena.allocator(), max_size);
@@ -255,9 +255,24 @@ fn Printer(comptime WriterType: type) type {
     };
 }
 
-pub fn compose(writer: anytype, output: anytype) !void {
+fn compose(writer: anytype, output: anytype) !void {
     var printer = Printer(@TypeOf(writer)).init(writer);
     try printer.print(output);
+}
+
+pub fn interact(
+    comptime Input: type,
+    comptime Output: type,
+    allocator: Allocator,
+    reader: anytype,
+    writer: anytype,
+    input_max_size: usize,
+    solver: fn (Input) Output,
+) !void {
+    const input = try parse(Input, allocator, reader, input_max_size);
+    defer input.deinit();
+    const output = solver(input.value);
+    try compose(writer, output);
 }
 
 test "read words" {
@@ -521,4 +536,29 @@ test "compose slice arrays" {
     var stream = std.io.fixedBufferStream(&buf);
     try compose(stream.writer(), output);
     try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "interact like an echo" {
+    const allocator = testing.allocator;
+    const Input = struct { s: []const u8 };
+    const Output = struct { s: []const u8 };
+    const s = struct {
+        fn echo(input: Input) Output {
+            return .{ .s = input.s };
+        }
+    };
+    var input_buf = "Hello\n";
+    var output_buf: [input_buf.len]u8 = undefined;
+    var input_stream = std.io.fixedBufferStream(input_buf);
+    var output_stream = std.io.fixedBufferStream(&output_buf);
+    try interact(
+        Input,
+        Output,
+        allocator,
+        input_stream.reader(),
+        output_stream.writer(),
+        4096,
+        s.echo,
+    );
+    try testing.expectEqualStrings(input_buf, &output_buf);
 }
