@@ -11,7 +11,7 @@ fn solve(input: Input, printer: *io.StdOutPrinter) !void {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer if (gpa.deinit()) @panic("gpa memmory leaked");
     const input_max_size = 1024 * 1024 * 512;
     try io.interactStdIO(Input, gpa.allocator(), input_max_size, solve);
 }
