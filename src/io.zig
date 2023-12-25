@@ -202,7 +202,7 @@ fn parse(comptime T: type, allocator: Allocator, reader: anytype, max_size: usiz
     return Parsed(T).init(arena, v);
 }
 
-fn Printer(comptime WriterType: type) type {
+pub fn Printer(comptime WriterType: type) type {
     return struct {
         const Self = @This();
         writer: WriterType,
@@ -287,14 +287,13 @@ fn interact(
     try printer.print(@as([]const u8, l_token));
 }
 
-const StdOutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
-pub const StdOutPrinter = Printer(StdOutWriter);
+pub const StdOutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
 
-pub fn interactStdIO(
+pub fn interactStdio(
     comptime InputType: type,
     allocator: Allocator,
     input_max_size: usize,
-    solver: fn (InputType, *StdOutPrinter) anyerror!void,
+    solver: fn (InputType, *Printer(StdOutWriter)) anyerror!void,
 ) !void {
     const stdin_file = std.io.getStdIn().reader();
     const stdout_file = std.io.getStdOut().writer();
