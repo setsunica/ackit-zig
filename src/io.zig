@@ -5,6 +5,7 @@ const TokenIterator = std.mem.TokenIterator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const StructField = std.builtin.Type.StructField;
 const Type = std.builtin.Type;
+const Tuple = std.meta.Tuple;
 const testing = std.testing;
 
 const ScanError = error{
@@ -12,6 +13,22 @@ const ScanError = error{
     NoNextLine,
     InvalidArraySize,
 };
+
+fn isTuple(comptime T: type) bool {
+    switch (@typeInfo(T)) {
+        .Struct => |s| {
+            comptime var i: usize = 0;
+            inline while (i < s.fields.len) : (i += 1) {
+                const field = s.fields[i];
+                inline for (field.name) |c| {
+                    if (!std.ascii.isDigit(c)) return false;
+                }
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
 
 fn Parsed(comptime T: type) type {
     return struct {
@@ -103,13 +120,13 @@ const Scanner = struct {
                 break :blk try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
             },
             .Pointer => |p| blk: {
-                if (p.size != .Slice) @compileError("invalid type" ++ @typeName(T) ++ ", non-slice pointers are not supported for scanning");
+                if (p.size != .Slice) @compileError("invalid type " ++ @typeName(T) ++ ", non-slice pointers are not supported for scanning");
                 if (p.child == u8) return self.cursor.readW() orelse return error.NoNextWord;
                 break :blk switch (@typeInfo(p.child)) {
                     .Pointer => |pp| if (pp.size == .Slice)
                         try self.scanLs(pp.child)
                     else
-                        @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
+                        @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
                     .Array => try self.scanArrays(p.child),
                     else => try self.scanWs(p.child) orelse error.NoNextLine,
                 };
@@ -124,7 +141,7 @@ const Scanner = struct {
                 }
                 break :blk v;
             },
-            else => @compileError("invalid type" ++ @typeName(T) ++ ", unsupported types for scanning"),
+            else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for scanning"),
         };
     }
 
@@ -162,8 +179,7 @@ const Scanner = struct {
         var r: [a.len]a.child = undefined;
         var i: usize = 0;
         while (i < a.len) : (i += 1) {
-            const v = try self.scan(a.child);
-            r[i] = v;
+            r[i] = try self.scan(a.child);
         }
         return r;
     }
@@ -207,13 +223,13 @@ fn Printer(comptime WriterType: type) type {
                 },
                 .Float => try self.writer.print("{d}", .{value}),
                 .Pointer => |p| {
-                    if (p.size != .Slice) @compileError("invalid type" ++ @typeName(T) ++ ", non-slice pointers are not supported for printing");
+                    if (p.size != .Slice) @compileError("invalid type " ++ @typeName(T) ++ ", non-slice pointers are not supported for printing");
                     switch (@typeInfo(p.child)) {
                         .Pointer => |pp| {
                             if (pp.size == .Slice)
                                 try self.printLs(p.child, value)
                             else
-                                @compileError("invalid type" ++ @typeName(p.child) ++ ", non-slice pointers are not supported for printing");
+                                @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for printing");
                         },
                         .Array => try self.printLs(p.child, value),
                         else => if (p.child == u8)
@@ -225,13 +241,14 @@ fn Printer(comptime WriterType: type) type {
                 .Array => |a| try self.print(@as([]const a.child, &value)),
                 .Struct => |s| {
                     comptime var i: usize = 0;
+                    const sep = if (isTuple(T)) w_token else l_token;
                     inline while (i < s.fields.len) : (i += 1) {
                         const field = s.fields[i];
                         try self.print(@field(value, field.name));
-                        _ = try self.writer.write(l_token);
+                        if (i != s.fields.len - 1) _ = try self.writer.write(sep);
                     }
                 },
-                else => @compileError("invalid type" ++ @typeName(T) ++ ", unsupported types for printing"),
+                else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for printing"),
             }
         }
 
@@ -255,23 +272,19 @@ fn Printer(comptime WriterType: type) type {
     };
 }
 
-fn compose(writer: anytype, output: anytype) !void {
-    var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
-}
-
 fn interact(
     comptime InputType: type,
     allocator: Allocator,
     reader: anytype,
     writer: anytype,
     input_max_size: usize,
-    solver: fn (InputType, *Printer(@TypeOf(writer))) std.os.WriteError!void,
+    solver: fn (InputType, *Printer(@TypeOf(writer))) anyerror!void,
 ) !void {
     const input = try parse(InputType, allocator, reader, input_max_size);
     defer input.deinit();
     var printer = Printer(@TypeOf(writer)).init(writer);
     try solver(input.value, &printer);
+    try printer.print(@as([]const u8, l_token));
 }
 
 const StdOutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
@@ -281,7 +294,7 @@ pub fn interactStdIO(
     comptime InputType: type,
     allocator: Allocator,
     input_max_size: usize,
-    solver: fn (InputType, *StdOutPrinter) std.os.WriteError!void,
+    solver: fn (InputType, *StdOutPrinter) anyerror!void,
 ) !void {
     const stdin_file = std.io.getStdIn().reader();
     const stdout_file = std.io.getStdOut().writer();
@@ -460,23 +473,24 @@ test "parse slice arrays" {
     }
 }
 
-test "compose custom output" {
+test "print custom output" {
     const expected =
         \\c
         \\-1
         \\2.3
         \\abc
+        \\x -2 3.3
         \\0123456789
         \\1 2 3
         \\4 5 6
         \\7 8 9
-        \\
     ;
     const Output = struct {
         c: u8,
         i: i32,
         f: f64,
         s: []const u8,
+        t: Tuple(&.{ u8, i32, f64 }),
         a: [10]u8,
         s2: []const []const i32,
     };
@@ -490,19 +504,28 @@ test "compose custom output" {
         &.{ 4, 5, 6 },
         &.{ 7, 8, 9 },
     };
-    const output = Output{ .c = 'c', .i = -1, .f = 2.3, .s = "abc", .a = a, .s2 = s2 };
+    const output = Output{
+        .c = 'c',
+        .i = -1,
+        .f = 2.3,
+        .s = "abc",
+        .t = .{ 'x', -2, 3.3 },
+        .a = a,
+        .s2 = s2,
+    };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try compose(stream.writer(), output);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
-test "compose 2d array" {
+test "print 2d array" {
     const expected =
         \\1 2 3
         \\-4 -5 -6
         \\7 8 9
-        \\
     ;
     const Output = struct {
         a2: [3][3]i32,
@@ -515,16 +538,17 @@ test "compose 2d array" {
     const output = Output{ .a2 = a2 };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try compose(stream.writer(), output);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
-test "compose array slices" {
+test "print array slices" {
     const expected =
         \\1 2 3
         \\-4 -5 -6
         \\7 8 9
-        \\
     ;
     const Output = struct {
         as: []const [3]i32,
@@ -537,16 +561,17 @@ test "compose array slices" {
     const output = Output{ .as = as };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try compose(stream.writer(), output);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
-test "compose slice arrays" {
+test "print slice arrays" {
     const expected =
         \\1 2 3
         \\-4 -5 -6
         \\7 8 9
-        \\
     ;
     const Output = struct {
         sa: [3][]const i32,
@@ -559,7 +584,9 @@ test "compose slice arrays" {
     const output = Output{ .sa = sa };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
-    try compose(stream.writer(), output);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
