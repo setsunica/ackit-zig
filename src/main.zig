@@ -52,13 +52,16 @@ pub fn main() !void {
     defer out_file.close();
     var out_buffer = std.io.bufferedWriter(out_file.writer());
     const out_writer = out_buffer.writer();
-    const trim_index = std.mem.indexOf(u8, io_lib, "// Below is the test code.").?;
-    const io_lib_trimed = io_lib[0..trim_index];
-    var output = try std.mem.replaceOwned(u8, allocator, io_lib_trimed, "// Below is the test code.", "");
-    output = try std.mem.replaceOwned(u8, allocator, output, "\n", "");
-    output = try std.mem.replaceOwned(u8, allocator, output, "  ", " ");
-    output = try std.mem.replaceOwned(u8, allocator, output, "  ", " ");
-    try out_writer.print("{s}\n", .{output});
-    _ = try out_writer.write(temp_text);
+    const io_test_index = std.mem.indexOf(u8, io_lib, "// Below is the test code.").?;
+    var io_impl = io_lib[0..io_test_index];
+    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl,
+        \\const std = @import("std");
+    , "");
+    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "const testing = std.testing;", "");
+    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "\n", "");
+    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "  ", " ");
+    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "  ", " ");
+    const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl);
+    try out_writer.writeAll(output);
     try out_buffer.flush();
 }
