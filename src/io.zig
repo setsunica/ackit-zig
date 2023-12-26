@@ -295,10 +295,10 @@ pub fn interactStdio(
     input_max_size: usize,
     solver: fn (InputType, *Printer(StdOutWriter)) anyerror!void,
 ) !void {
-    const stdin_file = std.io.getStdIn().reader();
-    const stdout_file = std.io.getStdOut().writer();
-    var br = std.io.bufferedReader(stdin_file);
-    var bw = std.io.bufferedWriter(stdout_file);
+    const sr = std.io.getStdIn().reader();
+    const sw = std.io.getStdOut().writer();
+    var br = std.io.bufferedReader(sr);
+    var bw = std.io.bufferedWriter(sw);
     const stdin = br.reader();
     const stdout = bw.writer();
     try interact(
@@ -311,6 +311,9 @@ pub fn interactStdio(
     );
     try bw.flush();
 }
+
+
+// Below is the test code.
 
 test "read words" {
     const s =
