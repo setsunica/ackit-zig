@@ -3,7 +3,7 @@ const std = @import("std");
 const Input = struct { s: []const u8 };
 const Output = struct { s: []const u8 };
 
-fn solve(input: Input, printer: *io.Printer(io.StdOutWriter)) !void {
+fn solve(input: Input, printer: *io.Printer(io.StdoutWriter)) !void {
     const output = .{ .s = input.s };
     try printer.print(output);
 }
@@ -15,4 +15,5 @@ pub fn main() !void {
     try io.interactStdio(Input, gpa.allocator(), input_max_size, solve);
 }
 
+// zig fmt: off
 const io = struct { {{IO_IMPL}} };

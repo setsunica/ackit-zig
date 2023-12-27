@@ -6,7 +6,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const StructField = std.builtin.Type.StructField;
 const Type = std.builtin.Type;
 const Tuple = std.meta.Tuple;
-const testing = std.testing;
+pub const StdoutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
 
 const ScanError = error{
     NoNextWord,
@@ -287,13 +287,11 @@ fn interact(
     try printer.print(@as([]const u8, l_token));
 }
 
-pub const StdOutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
-
 pub fn interactStdio(
     comptime InputType: type,
     allocator: Allocator,
     input_max_size: usize,
-    solver: fn (InputType, *Printer(StdOutWriter)) anyerror!void,
+    solver: fn (InputType, *Printer(StdoutWriter)) anyerror!void,
 ) !void {
     const sr = std.io.getStdIn().reader();
     const sw = std.io.getStdOut().writer();
@@ -312,8 +310,8 @@ pub fn interactStdio(
     try bw.flush();
 }
 
-
 // Below is the test code.
+const testing = std.testing;
 
 test "read words" {
     const s =
