@@ -3,7 +3,7 @@ const log = std.log;
 const Dir = std.fs.Dir;
 const ArgIterator = std.process.ArgIterator;
 
-const io_lib = @embedFile("io.zig");
+const io_impl = @embedFile("io.zig");
 const temp_text = @embedFile("temp.txt");
 
 const Error = error{
@@ -13,7 +13,7 @@ const Error = error{
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit()) @panic("gpa memory leaked");
+    defer if (gpa.deinit() == .leak) @panic("gpa memory leaked");
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     var allocator = arena.allocator();
@@ -52,16 +52,16 @@ pub fn main() !void {
     defer out_file.close();
     var out_buffer = std.io.bufferedWriter(out_file.writer());
     const out_writer = out_buffer.writer();
-    const io_test_index = std.mem.indexOf(u8, io_lib, "// Below is the test code.").?;
-    var io_impl = io_lib[0..io_test_index];
-    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl,
+    const io_test_index = std.mem.indexOf(u8, io_impl, "// Below is the test code.").?;
+    var io_impl_trimed = io_impl[0..io_test_index];
+    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed,
         \\const std = @import("std");
     , "");
-    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "const testing = std.testing;", "");
-    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "\n", "");
-    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "  ", " ");
-    io_impl = try std.mem.replaceOwned(u8, allocator, io_impl, "  ", " ");
-    const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl);
+    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "const testing = std.testing;", "");
+    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "\n", "");
+    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
+    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
+    const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl_trimed);
     try out_writer.writeAll(output);
     try out_buffer.flush();
 }
