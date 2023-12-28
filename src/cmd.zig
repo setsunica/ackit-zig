@@ -1,5 +1,5 @@
 const std = @import("std");
-const log = std.log;
+const log = std.log.scoped(.ackit);
 const Allocator = std.mem.Allocator;
 const ArgIterator = std.process.ArgIterator;
 const temp = @import("cmd/temp.zig");
