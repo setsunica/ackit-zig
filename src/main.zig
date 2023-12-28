@@ -8,7 +8,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const stderr = std.io.getStdErr().writer();
     var args = try ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
 
@@ -19,11 +18,11 @@ pub fn main() !void {
     var c = cmd.parse(allocator, &args) catch |err| {
         switch (err) {
             error.NoCmd => {
-                try cmd.printUsage(stderr);
+                try cmd.printUsage();
                 return log.err("Please specify what the command is.", .{});
             },
             error.InvalidCmd => {
-                try cmd.printUsage(stderr);
+                try cmd.printUsage();
                 return log.err("The specified command is invalid.", .{});
             },
             else => return log.err("Failed to parse args: {}", .{err}),

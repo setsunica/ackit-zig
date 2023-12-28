@@ -31,7 +31,7 @@ pub const TempCmd = struct {
     pub fn run(self: *TempCmd) !void {
         var allocator = self.arena.allocator();
         const cwd = std.fs.cwd();
-        
+
         const out_file_path = if (std.fs.path.isAbsolute(self.output_path))
             try std.fs.path.resolve(allocator, &[_][]const u8{self.output_path})
         else blk: {
@@ -72,8 +72,7 @@ pub const TempCmd = struct {
 };
 
 const options =
-    \\    -h, --help    Display this help.
-    \\
+    \\-h, --help    Display this help.
 ;
 
 const params = clap.parseParamsComptime(options ++
@@ -81,13 +80,14 @@ const params = clap.parseParamsComptime(options ++
     \\
 );
 
-fn printUsage(writer: anytype) !void {
-    try writer.writeAll(comptime 
-    \\Usage: ackit temp <output_path> [option]
-    \\
-    \\Options:
-    \\
-    ++ options ++ "\n");
+fn printUsage() !void {
+    log.info(
+        \\Usage: ackit temp <output_path> [option]
+        \\
+        \\Options:
+        \\    {s}
+        \\
+    , .{options});
 }
 
 pub fn parse(allocator: Allocator, args: *ArgIterator) !?TempCmd {
@@ -100,20 +100,20 @@ pub fn parse(allocator: Allocator, args: *ArgIterator) !?TempCmd {
         args,
         .{ .diagnostic = &diag, .allocator = allocator },
     ) catch |err| {
-        try printUsage(stderr);
+        try printUsage();
         try diag.report(stderr, err);
         return null;
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        try printUsage(stderr);
+        try printUsage();
         return null;
     }
 
     if (res.positionals.len <= 0) {
-        try printUsage(stderr);
-        std.debug.print("The output parameter is required.\n", .{});
+        try printUsage();
+        log.err("The output parameter is required.", .{});
         return TempCmdError.NoOutputPathSpecified;
     }
     return TempCmd.init(allocator, res.positionals[0]);

@@ -25,8 +25,8 @@ const Cmd = struct {
 
     pub fn run(self: *Cmd) !void {
         switch (self.cmd_type) {
-            .help => try printUsage(std.io.getStdErr().writer()),
-            .version => std.debug.print(comptime "ackit: " ++ version, .{}),
+            .help => try printUsage(),
+            .version => log.info("ackit: {s}", .{version}),
             inline else => |*c| try c.run(),
         }
     }
@@ -39,8 +39,8 @@ const Cmd = struct {
     }
 };
 
-pub fn printUsage(writer: anytype) !void {
-    try writer.writeAll(
+pub fn printUsage() !void {
+    log.info(
         \\Usage: ackit <command>
         \\
         \\Commands:
@@ -48,8 +48,7 @@ pub fn printUsage(writer: anytype) !void {
         \\  version               Display version information.
         \\  temp <output_path>    Create a template file in the specified output path.
         \\
-        \\
-    );
+    , .{});
 }
 
 pub fn parse(allocator: Allocator, args: *ArgIterator) !?Cmd {
