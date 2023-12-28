@@ -7,16 +7,15 @@ const cmd = @import("cmd.zig");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-    var allocator = arena.allocator();
+    const allocator = gpa.allocator();
     const stderr = std.io.getStdErr().writer();
-
     var args = try ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
+
     if (!args.skip()) {
         @panic("0th argument should have been the executable file path, but none was passed");
     }
+
     var c = cmd.parse(allocator, &args) catch |err| {
         switch (err) {
             error.NoCmd => {
@@ -30,6 +29,9 @@ pub fn main() !void {
             else => return log.err("Failed to parse args: {}", .{err}),
         }
     } orelse return;
+
+    defer c.deinit();
+
     c.run() catch |err| {
         log.err("Failed to command `{s}`: {}", .{ c.name, err });
     };
