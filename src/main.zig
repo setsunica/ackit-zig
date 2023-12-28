@@ -1,67 +1,36 @@
 const std = @import("std");
 const log = std.log;
-const Dir = std.fs.Dir;
+const Allocator = std.mem.Allocator;
 const ArgIterator = std.process.ArgIterator;
-
-const io_impl = @embedFile("io.zig");
-const temp_text = @embedFile("temp.txt");
-
-const Error = error{
-    NoOutputPathSpecified,
-    OutputDirectoryPathUnidentified,
-};
+const cmd = @import("cmd.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit() == .leak) @panic("gpa memory leaked");
+    defer _ = gpa.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
     var allocator = arena.allocator();
+    const stderr = std.io.getStdErr().writer();
 
     var args = try ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
     if (!args.skip()) {
-        @panic("the first argument should have been the executable file path, but none was passed");
+        @panic("0th argument should have been the executable file path, but none was passed");
     }
-
-    const path = args.next() orelse {
-        log.err("specify the path to create the template file as the first argument", .{});
-        return error.OutputPathNotFound;
-    };
-    log.debug("output file path is {s}", .{path});
-
-    const cwd = std.fs.cwd();
-    const out_file_path = if (std.fs.path.isAbsolute(path))
-        try std.fs.path.resolve(allocator, &[_][]const u8{path})
-    else blk: {
-        const current = try cwd.realpathAlloc(allocator, "");
-        break :blk try std.fs.path.join(allocator, &[_][]const u8{ current, path });
-    };
-    log.debug("output file absolute path is {s}", .{out_file_path});
-
-    if (std.fs.path.dirname(out_file_path)) |dir_path|
-        std.fs.makeDirAbsolute(dir_path) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
+    var c = cmd.parse(allocator, &args) catch |err| {
+        switch (err) {
+            error.NoCmd => {
+                try cmd.printUsage(stderr);
+                return log.err("Please specify what the command is.", .{});
+            },
+            error.InvalidCmd => {
+                try cmd.printUsage(stderr);
+                return log.err("The specified command is invalid.", .{});
+            },
+            else => return log.err("Failed to parse args: {}", .{err}),
         }
-    else {
-        log.err("The directory path for the specified file could not be identified.", .{});
-        return error.OutputDirectoryPathUnidentified;
-    }
-
-    const out_file = try std.fs.createFileAbsolute(out_file_path, .{});
-    defer out_file.close();
-    var out_buffer = std.io.bufferedWriter(out_file.writer());
-    const out_writer = out_buffer.writer();
-    const io_test_index = std.mem.indexOf(u8, io_impl, "// Below is the test code.").?;
-    var io_impl_trimed = io_impl[0..io_test_index];
-    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed,
-        \\const std = @import("std");
-    , "");
-    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "const testing = std.testing;", "");
-    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "\n", "");
-    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
-    io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
-    const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl_trimed);
-    try out_writer.writeAll(output);
-    try out_buffer.flush();
+    } orelse return;
+    c.run() catch |err| {
+        log.err("Failed to command `{s}`: {}", .{ c.name, err });
+    };
 }
