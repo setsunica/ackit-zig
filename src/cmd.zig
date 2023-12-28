@@ -30,6 +30,13 @@ const Cmd = struct {
             inline else => |*c| try c.run(),
         }
     }
+
+    pub fn deinit(self: Cmd) void {
+        switch (self.cmd_type) {
+            .temp => |c| c.deinit(),
+            else => return,
+        }
+    }
 };
 
 pub fn printUsage(writer: anytype) !void {
