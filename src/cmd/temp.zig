@@ -7,6 +7,7 @@ const io_impl = @embedFile("../io.zig");
 const temp_text = @embedFile("temp.txt");
 const Dir = std.fs.Dir;
 const clap = @import("clap");
+const helper = @import("../helper.zig");
 
 pub const TempCmdError = error{
     NoOutputPathSpecified,
@@ -35,9 +36,11 @@ pub const TempCmd = struct {
         const out_file_path = if (std.fs.path.isAbsolute(self.output_path))
             try std.fs.path.resolve(allocator, &[_][]const u8{self.output_path})
         else blk: {
-            const current = try cwd.realpathAlloc(allocator, "");
+            const current = try cwd.realpathAlloc(allocator, ".");
+            log.debug("current=`{s}`", .{current});
             break :blk try std.fs.path.join(allocator, &[_][]const u8{ current, self.output_path });
         };
+        log.debug("out_file_path=`{s}`", .{out_file_path});
 
         if (std.fs.path.dirname(out_file_path)) |dir_path|
             std.fs.makeDirAbsolute(dir_path) catch |err| {
@@ -45,7 +48,7 @@ pub const TempCmd = struct {
             }
         else {
             log.err(
-                "The directory path for the specified file [{s}] could not be identified.",
+                "The directory path for the specified file `{s}` could not be identified.",
                 .{self.output_path},
             );
             return error.OutputDirectoryPathUnidentified;
@@ -57,12 +60,13 @@ pub const TempCmd = struct {
         const out_writer = out_buffer.writer();
         const io_test_index = std.mem.indexOf(u8, io_impl, "// Below is the test code.").?;
         var io_impl_trimed = io_impl[0..io_test_index];
+
         io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed,
             \\const std = @import("std");
         , "");
+
         io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "\n", "");
-        io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
-        io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "  ", " ");
+        io_impl_trimed = try helper.mem.collapseScalarOwned(u8, allocator, io_impl_trimed, ' ');
         const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl_trimed);
         try out_writer.writeAll(output);
         try out_buffer.flush();
@@ -76,6 +80,7 @@ const options =
 ;
 
 const params = clap.parseParamsComptime(options ++
+    \\
     \\<str>
     \\
 );
