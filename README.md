@@ -1,5 +1,5 @@
 # ackit
-`ackit` is a console application that generates templates for the Zig language that can be used when submitting code to AtCoder. It also includes a Zig language library to handle the input and output of AtCoder questions.
+`ackit` is a console application that generates templates for the Zig language that can be used when submitting code to AtCoder. It also includes a Zig language library to handle the input and output of AtCoder problems.
 
 
 ## Installation
