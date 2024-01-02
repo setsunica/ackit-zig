@@ -594,10 +594,9 @@ test "interact like an echo" {
     const allocator = testing.allocator;
     const Input = struct { s: []const u8 };
     const Output = struct { s: []const u8 };
-    _ = Output;
     const s = struct {
         fn echo(input: Input, printer: *Printer(std.io.FixedBufferStream([]u8).Writer)) !void {
-            const output = .{ .s = input.s };
+            const output = Output{ .s = input.s };
             try printer.print(output);
         }
     };
