@@ -8,7 +8,7 @@ const Type = std.builtin.Type;
 const Tuple = std.meta.Tuple;
 pub const StdoutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
 
-const ScanError = error{
+pub const ScanError = error{
     NoNextWord,
     NoNextLine,
     InvalidArraySize,
@@ -272,7 +272,7 @@ pub fn Printer(comptime WriterType: type) type {
     };
 }
 
-fn interact(
+pub fn interact(
     comptime InputType: type,
     allocator: Allocator,
     reader: anytype,
@@ -497,7 +497,7 @@ test "print custom output" {
     var a: [10]u8 = undefined;
     var i: usize = 0;
     while (i < a.len) : (i += 1) {
-        a[i] = @intCast(u8, i) + '0';
+        a[i] = @as(u8, @intCast(i)) + '0';
     }
     var s2 = &.{
         &.{ 1, 2, 3 },
