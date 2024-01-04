@@ -8,27 +8,15 @@ const Type = std.builtin.Type;
 const Tuple = std.meta.Tuple;
 pub const StdoutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
 
+const scan_fn_decl_name = "scan";
+const print_fn_decl_name = "print";
+const size_field_name_decl_name = "size_field_name";
+
 pub const ScanError = error{
     NoNextWord,
     NoNextLine,
     InvalidArraySize,
 };
-
-fn isTuple(comptime T: type) bool {
-    switch (@typeInfo(T)) {
-        .Struct => |s| {
-            comptime var i: usize = 0;
-            inline while (i < s.fields.len) : (i += 1) {
-                const field = s.fields[i];
-                inline for (field.name) |c| {
-                    if (!std.ascii.isDigit(c)) return false;
-                }
-            }
-            return true;
-        },
-        else => return false,
-    }
-}
 
 fn Parsed(comptime T: type) type {
     return struct {
@@ -133,11 +121,19 @@ const Scanner = struct {
             },
             .Array => try self.scanArray(T) orelse error.NoNextWord,
             .Struct => |s| blk: {
+                if (@hasDecl(T, scan_fn_decl_name) and !@hasDecl(T, size_field_name_decl_name)) {
+                    break :blk try T.scan(self.arena.allocator(), self);
+                }
                 var v: T = undefined;
-                comptime var i: usize = 0;
-                inline while (i < s.fields.len) : (i += 1) {
-                    const field = s.fields[i];
-                    @field(v, field.name) = try self.scan(field.field_type);
+                inline for (s.fields) |field| {
+                    const field_type = field.field_type;
+                    const is_struct = @typeInfo(field_type) == .Struct;
+                    if (is_struct and @hasDecl(field_type, scan_fn_decl_name) and @hasDecl(field_type, size_field_name_decl_name)) {
+                        const size = @field(v, field_type.size_field_name);
+                        @field(v, field.name) = try field_type.scan(self.arena.allocator(), self, size);
+                    } else {
+                        @field(v, field.name) = try self.scan(field_type);
+                    }
                 }
                 break :blk v;
             },
@@ -240,8 +236,11 @@ pub fn Printer(comptime WriterType: type) type {
                 },
                 .Array => |a| try self.print(@as([]const a.child, &value)),
                 .Struct => |s| {
+                    if (@hasDecl(T, print_fn_decl_name)) {
+                        return try value.print(WriterType, self);
+                    }
                     comptime var i: usize = 0;
-                    const sep = if (isTuple(T)) w_token else l_token;
+                    const sep = if (s.is_tuple) w_token else l_token;
                     inline while (i < s.fields.len) : (i += 1) {
                         const field = s.fields[i];
                         try self.print(@field(value, field.name));
@@ -308,6 +307,46 @@ pub fn interactStdio(
         solver,
     );
     try bw.flush();
+}
+
+pub fn DependSizedSlice(comptime T: type, comptime field_name: []const u8) type {
+    return struct {
+        const Self = @This();
+        const size_field_name = field_name;
+        slice: []const T,
+
+        fn scan(allocator: Allocator, scanner: *Scanner, size: usize) !Self {
+            var s = try allocator.alloc(T, size);
+            for (s) |*e| {
+                e.* = try scanner.scan(T);
+            }
+            return Self{ .slice = s };
+        }
+    };
+}
+
+pub fn VerticalSlice(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        slice: []const T,
+
+        fn init(slice: []const T) Self {
+            return Self{.slice = slice};
+        }
+
+        fn scan(allocator: Allocator, scanner: *Scanner) !Self {
+            var arr = ArrayList(T).init(allocator);
+            while (true) {
+                const v = scanner.scan(T) catch break;
+                try arr.append(v);
+            }
+            return Self{ .slice = arr.toOwnedSlice() };
+        }
+
+        fn print(self: Self, comptime WriterType: type, printer: *Printer(WriterType)) WriterType.Error!void {
+            try printer.printLs(T, self.slice);
+        }
+    };
 }
 
 // Below is the test code.
@@ -473,6 +512,58 @@ test "parse slice arrays" {
     }
 }
 
+test "parse depend sized slice" {
+    const allocator = testing.allocator;
+    const s =
+        \\3
+        \\10
+        \\11
+        \\12
+        \\5
+        \\13 a
+        \\14 b
+        \\15 c
+        \\16 d
+        \\17 e
+    ;
+    const Input = struct {
+        n: u32,
+        s1: DependSizedSlice(u32, "n"),
+        m: u32,
+        s2: DependSizedSlice(Tuple(&.{ u32, u8 }), "m"),
+    };
+    const expected_s1 = [_]u32{ 10, 11, 12 };
+    const expected_s2 = [_]Tuple(&.{ u32, u8 }){
+        .{ 13, 'a' },
+        .{ 14, 'b' },
+        .{ 15, 'c' },
+        .{ 16, 'd' },
+        .{ 17, 'e' },
+    };
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(Input, allocator, stream.reader(), 4096);
+    defer parsed.deinit();
+    try testing.expectEqualSlices(u32, &expected_s1, parsed.value.s1.slice);
+    try testing.expectEqualSlices(Tuple(&.{ u32, u8 }), &expected_s2, parsed.value.s2.slice);
+}
+
+test "parse vertical slice" {
+    const allocator = testing.allocator;
+    const s =
+        \\1
+        \\2
+        \\3
+        \\4
+        \\5
+    ;
+    const Input = struct { vs: VerticalSlice(u32) };
+    const expected = [_]u32{ 1, 2, 3, 4, 5 };
+    var stream = std.io.fixedBufferStream(s);
+    const parsed = try parse(Input, allocator, stream.reader(), 4096);
+    defer parsed.deinit();
+    try testing.expectEqualSlices(u32, &expected, parsed.value.vs.slice);
+}
+
 test "print custom output" {
     const expected =
         \\c
@@ -497,7 +588,7 @@ test "print custom output" {
     var a: [10]u8 = undefined;
     var i: usize = 0;
     while (i < a.len) : (i += 1) {
-        a[i] = @as(u8, @intCast(i)) + '0';
+        a[i] = @intCast(u8, i) + '0';
     }
     var s2 = &.{
         &.{ 1, 2, 3 },
@@ -527,9 +618,7 @@ test "print 2d array" {
         \\-4 -5 -6
         \\7 8 9
     ;
-    const Output = struct {
-        a2: [3][3]i32,
-    };
+    const Output = struct { a2: [3][3]i32 };
     const a2 = .{
         .{ 1, 2, 3 },
         .{ -4, -5, -6 },
@@ -550,9 +639,7 @@ test "print array slices" {
         \\-4 -5 -6
         \\7 8 9
     ;
-    const Output = struct {
-        as: []const [3]i32,
-    };
+    const Output = struct { as: []const [3]i32 };
     const as = &.{
         .{ 1, 2, 3 },
         .{ -4, -5, -6 },
@@ -573,9 +660,7 @@ test "print slice arrays" {
         \\-4 -5 -6
         \\7 8 9
     ;
-    const Output = struct {
-        sa: [3][]const i32,
-    };
+    const Output = struct { sa: [3][]const i32 };
     const sa = .{
         &.{ 1, 2, 3 },
         &.{ -4, -5, -6 },
@@ -588,6 +673,25 @@ test "print slice arrays" {
     var printer = Printer(@TypeOf(writer)).init(writer);
     try printer.print(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "print vertical slice" {
+    const expected =
+        \\1
+        \\2
+        \\3
+        \\4
+        \\5
+    ;
+    const Output = struct { vs: VerticalSlice(u32) };
+    const vs = VerticalSlice(u32).init(&[_]u32{1, 2, 3, 4, 5});
+    const output = Output{.vs = vs};
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(output);
+    try testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
 
 test "interact like an echo" {
