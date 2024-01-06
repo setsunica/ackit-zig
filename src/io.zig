@@ -1,11 +1,4 @@
 const std = @import("std");
-const ArrayList = std.ArrayList;
-const Allocator = std.mem.Allocator;
-const TokenIterator = std.mem.TokenIterator;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const StructField = std.builtin.Type.StructField;
-const Type = std.builtin.Type;
-const Tuple = std.meta.Tuple;
 pub const StdoutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
 
 const scan_fn_decl_name = "scan";
@@ -20,10 +13,10 @@ pub const ScanError = error{
 
 fn Parsed(comptime T: type) type {
     return struct {
-        arena: ArenaAllocator,
+        arena: std.heap.ArenaAllocator,
         value: T,
 
-        fn init(arena: ArenaAllocator, value: T) Parsed(T) {
+        fn init(arena: std.heap.ArenaAllocator, value: T) Parsed(T) {
             return .{ .arena = arena, .value = value };
         }
 
@@ -38,8 +31,8 @@ const l_token = "\n";
 
 const Cursor = struct {
     source: []const u8,
-    l_iter: TokenIterator(u8),
-    w_iter: TokenIterator(u8),
+    l_iter: std.mem.TokenIterator(u8),
+    w_iter: std.mem.TokenIterator(u8),
 
     fn init(source: []const u8) Cursor {
         var l_iter = std.mem.tokenize(u8, source, l_token);
@@ -60,7 +53,7 @@ const Cursor = struct {
         } else null;
     }
 
-    fn readL(self: *Cursor) ?TokenIterator(u8) {
+    fn readL(self: *Cursor) ?std.mem.TokenIterator(u8) {
         return if (self.w_iter.peek()) |_| blk: {
             var ws = self.w_iter;
             self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
@@ -84,10 +77,10 @@ const Cursor = struct {
 };
 
 const Scanner = struct {
-    arena: *ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     cursor: Cursor,
 
-    fn init(arena: *ArenaAllocator, source: []const u8) Scanner {
+    fn init(arena: *std.heap.ArenaAllocator, source: []const u8) Scanner {
         return .{
             .arena = arena,
             .cursor = Cursor.init(source),
@@ -144,7 +137,7 @@ const Scanner = struct {
     fn scanWs(self: *Scanner, comptime Child: type) !?[]Child {
         const restCount = self.cursor.countRestW();
         if (restCount == 0) return null;
-        var arr = ArrayList(Child).init(self.arena.allocator());
+        var arr = std.ArrayList(Child).init(self.arena.allocator());
         var i: usize = 0;
         while (i < restCount) : (i += 1) {
             const v = try self.scan(Child);
@@ -154,7 +147,7 @@ const Scanner = struct {
     }
 
     fn scanLs(self: *Scanner, comptime Child: type) ![][]Child {
-        var arr = ArrayList([]Child).init(self.arena.allocator());
+        var arr = std.ArrayList([]Child).init(self.arena.allocator());
         while (try self.scanWs(Child)) |vs| {
             try arr.append(vs);
         }
@@ -181,7 +174,7 @@ const Scanner = struct {
     }
 
     fn scanArrays(self: *Scanner, comptime Array: type) ![]Array {
-        var arrs = ArrayList(Array).init(self.arena.allocator());
+        var arrs = std.ArrayList(Array).init(self.arena.allocator());
         while (try self.scanArray(Array)) |arr| {
             try arrs.append(arr);
         }
@@ -189,8 +182,8 @@ const Scanner = struct {
     }
 };
 
-fn parse(comptime T: type, allocator: Allocator, reader: anytype, max_size: usize) !Parsed(T) {
-    var arena = ArenaAllocator.init(allocator);
+fn parse(comptime T: type, allocator: std.mem.Allocator, reader: anytype, max_size: usize) !Parsed(T) {
+    var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const source = try reader.readAllAlloc(arena.allocator(), max_size);
     var scanner = Scanner.init(&arena, source);
@@ -273,7 +266,7 @@ pub fn Printer(comptime WriterType: type) type {
 
 pub fn interact(
     comptime InputType: type,
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
     reader: anytype,
     writer: anytype,
     input_max_size: usize,
@@ -288,7 +281,7 @@ pub fn interact(
 
 pub fn interactStdio(
     comptime InputType: type,
-    allocator: Allocator,
+    allocator: std.mem.Allocator,
     input_max_size: usize,
     solver: fn (InputType, *Printer(StdoutWriter)) anyerror!void,
 ) !void {
@@ -315,7 +308,7 @@ pub fn DependSizedSlice(comptime T: type, comptime field_name: []const u8) type 
         const size_field_name = field_name;
         slice: []const T,
 
-        fn scan(allocator: Allocator, scanner: *Scanner, size: usize) !Self {
+        fn scan(allocator: std.mem.Allocator, scanner: *Scanner, size: usize) !Self {
             var s = try allocator.alloc(T, size);
             for (s) |*e| {
                 e.* = try scanner.scan(T);
@@ -334,8 +327,8 @@ pub fn VerticalSlice(comptime T: type) type {
             return Self{.slice = slice};
         }
 
-        fn scan(allocator: Allocator, scanner: *Scanner) !Self {
-            var arr = ArrayList(T).init(allocator);
+        fn scan(allocator: std.mem.Allocator, scanner: *Scanner) !Self {
+            var arr = std.ArrayList(T).init(allocator);
             while (true) {
                 const v = scanner.scan(T) catch break;
                 try arr.append(v);
@@ -530,10 +523,10 @@ test "parse depend sized slice" {
         n: u32,
         s1: DependSizedSlice(u32, "n"),
         m: u32,
-        s2: DependSizedSlice(Tuple(&.{ u32, u8 }), "m"),
+        s2: DependSizedSlice(std.meta.Tuple(&.{ u32, u8 }), "m"),
     };
     const expected_s1 = [_]u32{ 10, 11, 12 };
-    const expected_s2 = [_]Tuple(&.{ u32, u8 }){
+    const expected_s2 = [_]std.meta.Tuple(&.{ u32, u8 }){
         .{ 13, 'a' },
         .{ 14, 'b' },
         .{ 15, 'c' },
@@ -544,7 +537,7 @@ test "parse depend sized slice" {
     const parsed = try parse(Input, allocator, stream.reader(), 4096);
     defer parsed.deinit();
     try testing.expectEqualSlices(u32, &expected_s1, parsed.value.s1.slice);
-    try testing.expectEqualSlices(Tuple(&.{ u32, u8 }), &expected_s2, parsed.value.s2.slice);
+    try testing.expectEqualSlices(std.meta.Tuple(&.{ u32, u8 }), &expected_s2, parsed.value.s2.slice);
 }
 
 test "parse vertical slice" {
@@ -581,7 +574,7 @@ test "print custom output" {
         i: i32,
         f: f64,
         s: []const u8,
-        t: Tuple(&.{ u8, i32, f64 }),
+        t: std.meta.Tuple(&.{ u8, i32, f64 }),
         a: [10]u8,
         s2: []const []const i32,
     };
