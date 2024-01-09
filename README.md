@@ -24,13 +24,12 @@ ackit temp <output_path>
 To use the generated template, you'll need to implement the following:
 
 ### Defining Input/Output Types
-Modify the definition of the Input structure within the template. Supported types include:
+Modify the definition of the `Input` and `Output` structure within the template. Supported types include:
 
 * Integer types (e.g. i32, u32)
 * Floating-point types (e.g. f32, f64)
 * Arrays and slices (up to 2D)
 * Structures (including tuples)
-* Example Input Type Definition:
 
 ### Example Input Type Definition
 ```
