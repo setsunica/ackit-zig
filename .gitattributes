@@ -1,2 +1,2 @@
 *.zig text eol=lf
-./src/cmd/temp.txt text eol=lf
+src/cmd/temp.txt text eol=lf
