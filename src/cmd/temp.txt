@@ -1,18 +1,21 @@
 const std = @import("std");
 
-const Input = struct { s: []const u8 };
-const Output = struct { s: []const u8 };
-
-fn solve(input: Input, printer: *io.Printer(io.StdoutWriter)) !void {
-    const output = .{ .s = input.s };
-    try printer.print(output);
+fn solve(
+    allocator: std.mem.Allocator,
+    scanner: *io.Scanner(io.StdinReader),
+    printer: *io.Printer(io.StdoutWriter),
+) !void {
+    _ = allocator;
+    const parsed = try scanner.scan([]const u8);
+    defer parsed.deinit();
+    const input = parsed.value;
+    try printer.print(input);
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const input_max_size = 512 * 1024 * 1024;
-    try io.interactStdio(Input, gpa.allocator(), input_max_size, solve);
+    try io.interactStdio(gpa.allocator(), solve);
 }
 
 // zig fmt: off
