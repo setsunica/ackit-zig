@@ -67,7 +67,7 @@ pub const TempCmd = struct {
 
         io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "\n", "");
         io_impl_trimed = try helper.mem.collapseScalarOwned(u8, allocator, io_impl_trimed, ' ');
-        const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{IO_IMPL}}", io_impl_trimed);
+        const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{ACKIT_IO_IMPL}}", io_impl_trimed);
         try out_writer.writeAll(output);
         try out_buffer.flush();
         log.info("Template file `{s}` has been created.", .{out_file_path});
