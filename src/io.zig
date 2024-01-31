@@ -355,7 +355,7 @@ pub fn interactStdio(
     try bw.flush();
 }
 
-pub fn DependSizedSlice(comptime T: type, comptime field_name: []const u8) type {
+pub fn DependencySizeSlice(comptime T: type, comptime field_name: []const u8) type {
     return struct {
         const Self = @This();
         const size_field_name = field_name;
@@ -590,7 +590,7 @@ test "scan optional words" {
     }
 }
 
-test "scan depend sized slice" {
+test "scan dependency size slice" {
     const allocator = testing.allocator;
     const s =
         \\3
@@ -606,9 +606,9 @@ test "scan depend sized slice" {
     ;
     const Input = struct {
         n: u32,
-        s1: DependSizedSlice(u32, "n"),
+        s1: DependencySizeSlice(u32, "n"),
         m: u32,
-        s2: DependSizedSlice(std.meta.Tuple(&.{ u32, u8 }), "m"),
+        s2: DependencySizeSlice(std.meta.Tuple(&.{ u32, u8 }), "m"),
     };
     const expected_s1 = [_]u32{ 10, 11, 12 };
     const expected_s2 = [_]std.meta.Tuple(&.{ u32, u8 }){
