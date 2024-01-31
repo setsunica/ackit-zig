@@ -122,11 +122,11 @@ pub fn Scanner(comptime ReaderType: type) type {
                     if (p.child == u8) return self.cursor.nextW() orelse return ScanError.NoNextWord;
                     break :blk switch (@typeInfo(p.child)) {
                         .Pointer => |pp| if (pp.size == .Slice)
-                            try self.scanLs(pp.child, allocator.?)
+                            try self.scanSlices(pp.child, allocator.?)
                         else
                             @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
                         .Array => try self.scanArrays(p.child, allocator.?),
-                        else => try self.scanWs(p.child, allocator.?) orelse ScanError.NoNextLine,
+                        else => try self.scanSlice(p.child, allocator.?) orelse ScanError.NoNextLine,
                     };
                 },
                 .Array => try self.scanArray(T, allocator) orelse ScanError.NoNextWord,
@@ -152,21 +152,21 @@ pub fn Scanner(comptime ReaderType: type) type {
             };
         }
 
-        fn scanWs(self: *Self, comptime Child: type, allocator: std.mem.Allocator) !?[]Child {
+        fn scanSlice(self: *Self, comptime T: type, allocator: std.mem.Allocator) !?[]T {
             const restCount = self.cursor.countRestW();
             if (restCount == 0) return null;
-            var arr = std.ArrayList(Child).init(allocator);
+            var arr = std.ArrayList(T).init(allocator);
             var i: usize = 0;
             while (i < restCount) : (i += 1) {
-                const v = try self.scanRaw(Child, allocator);
+                const v = try self.scanRaw(T, allocator);
                 try arr.append(v);
             }
             return arr.toOwnedSlice();
         }
 
-        fn scanLs(self: *Self, comptime Child: type, allocator: std.mem.Allocator) ![][]Child {
-            var arr = std.ArrayList([]Child).init(allocator);
-            while (try self.scanWs(Child, allocator)) |vs| {
+        fn scanSlices(self: *Self, comptime T: type, allocator: std.mem.Allocator) ![][]T {
+            var arr = std.ArrayList([]T).init(allocator);
+            while (try self.scanSlice(T, allocator)) |vs| {
                 try arr.append(vs);
             }
             return arr.toOwnedSlice();
@@ -205,7 +205,7 @@ pub fn Scanner(comptime ReaderType: type) type {
                 .Pointer => true,
                 .Array => |arr| isAllocatorRequired(arr.child),
                 .Struct => |s| blk: {
-                    if (hasScanAllocFn(T)) break :blk false;
+                    if (hasScanAllocFn(T)) break :blk true;
                     inline for (s.fields) |field| {
                         const field_type = field.field_type;
                         const is_struct = @typeInfo(field_type) == .Struct;
