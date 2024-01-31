@@ -6,7 +6,7 @@ const temp = @import("cmd/temp.zig");
 const TempCmdError = temp.TempCmdError;
 const TempCmd = temp.TempCmd;
 
-const version = "0.2.1";
+const version = "0.3.0";
 
 const CmdError = error{
     InvalidCmd,
