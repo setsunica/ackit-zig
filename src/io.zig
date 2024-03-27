@@ -257,7 +257,54 @@ pub fn Printer(comptime WriterType: type) type {
             return .{ .writer = writer };
         }
 
-        pub fn print(self: *Self, value: anytype) WriterType.Error!void {
+        fn Packet(comptime T: type) type {
+            return struct {
+                printer: *Self,
+                value: T,
+
+                pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+                    _ = fmt;
+                    _ = options;
+                    _ = writer;
+                    try self.printer.printRaw(self.value);
+                }
+            };
+        }
+
+        pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+            const fields = std.meta.fields(@TypeOf(args));
+            comptime var packet_types: [fields.len]type = undefined;
+
+            const Runtime = struct {
+                fn Type(comptime T: type) type {
+                    return switch (@typeInfo(T)) {
+                        .ComptimeInt => isize,
+                        .ComptimeFloat => f64,
+                        else => T,
+                    };
+                }
+            };
+
+            comptime var i: usize = 0;
+
+            inline while (i < fields.len) : (i += 1) {
+                packet_types[i] = Packet(Runtime.Type(fields[i].field_type));
+            }
+
+            const Packets = std.meta.Tuple(&packet_types);
+            var packets: Packets = undefined;
+
+            inline for (fields) |field| {
+                @field(packets, field.name) = Packet(Runtime.Type(field.field_type)){
+                    .printer = self,
+                    .value = @field(args, field.name),
+                };
+            }
+
+            try std.fmt.format(self.writer, fmt, packets);
+        }
+
+        fn printRaw(self: *Self, value: anytype) !void {
             const T = @TypeOf(value);
             switch (@typeInfo(T)) {
                 .Int => |i| {
@@ -272,15 +319,15 @@ pub fn Printer(comptime WriterType: type) type {
                     switch (p.size) {
                         .One => {
                             switch (@typeInfo(p.child)) {
-                                .Array => |a| try self.print(@as([]const a.child, value)),
-                                else => try self.print(@as(p.child, value.*)),
+                                .Array => |a| try self.printRaw(@as([]const a.child, value)),
+                                else => try self.printRaw(@as(p.child, value.*)),
                             }
                         },
                         .Slice => {
                             switch (@typeInfo(p.child)) {
                                 .Pointer => |pp| {
                                     switch (pp.size) {
-                                        .One => try self.print(@as([]const p.child, value)),
+                                        .One => try self.printRaw(@as([]const p.child, value)),
                                         .Slice => try self.printLs(p.child, value),
                                         else => @compileError("invalid type " ++ @typeName(p.child) ++ ", not one or slice size pointers are not supported for printing"),
                                     }
@@ -295,7 +342,7 @@ pub fn Printer(comptime WriterType: type) type {
                         else => @compileError("invalid type " ++ @typeName(T) ++ ", not one or slice size pointers are not supported for printing"),
                     }
                 },
-                .Array => |a| try self.print(@as([]const a.child, &value)),
+                .Array => |a| try self.printRaw(@as([]const a.child, &value)),
                 .Struct => |s| {
                     if (@hasDecl(T, print_fn_decl_name)) {
                         return try value.print(WriterType, self);
@@ -304,12 +351,12 @@ pub fn Printer(comptime WriterType: type) type {
                     const sep = if (s.is_tuple) w_token else l_token;
                     inline while (i < s.fields.len) : (i += 1) {
                         const field = s.fields[i];
-                        try self.print(@field(value, field.name));
+                        try self.printRaw(@field(value, field.name));
                         if (i != s.fields.len - 1) _ = try self.writer.write(sep);
                     }
                 },
-                .ComptimeInt => try self.print(@as(usize, value)),
-                .ComptimeFloat => try self.print(@as(f64, value)),
+                .ComptimeInt => try self.printRaw(@as(isize, value)),
+                .ComptimeFloat => try self.printRaw(@as(f64, value)),
                 else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for printing"),
             }
         }
@@ -317,7 +364,7 @@ pub fn Printer(comptime WriterType: type) type {
         fn printChildren(self: *Self, comptime Child: type, value: []const Child, sep: []const u8) !void {
             var i: usize = 0;
             while (i < value.len) : (i += 1) {
-                try self.print(value[i]);
+                try self.printRaw(value[i]);
                 if (i != value.len - 1) {
                     _ = try self.writer.write(sep);
                 }
@@ -347,7 +394,7 @@ pub fn interact(
     var scanner = Scanner(@TypeOf(reader)).init(reader);
     var printer = Printer(@TypeOf(writer)).init(writer);
     try solver(allocator, &scanner, &printer);
-    try printer.print(@as([]const u8, l_token));
+    try printer.printRaw(l_token);
 }
 
 pub fn interactStdio(
@@ -760,35 +807,63 @@ test "print custom output" {
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
+    try printer.printRaw(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
 test "print comptime value" {
     const expected =
-        \\1 2.3 hello
+        \\-1 2.3 hello
     ;
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(.{ 1, 2.3, "hello" });
+    try printer.printRaw(.{ -1, 2.3, "hello" });
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
 test "print pointer of pointer" {
     const expected =
-        \\1
+        \\-1
         \\2.3
         \\a
     ;
     const Output = struct { i: i32, f: f64, c: u8 };
-    const output = Output{ .i = 1, .f = 2.3, .c = 'a' };
+    const output = Output{ .i = -1, .f = 2.3, .c = 'a' };
     var buf: [4092]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(&&output);
+    try printer.printRaw(&&output);
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "print with format" {
+    const expected =
+        \\-1
+        \\2.3
+        \\4 5 6
+        \\abc
+        \\x
+        \\y
+        \\z
+    ;
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print("{}\n{}\n{}\n{}\n{}", .{
+        -1,
+        2.3,
+        &.{ 4, 5, 6 },
+        "abc",
+        struct { x: u8, y: u8, z: u8 }{
+            .x = 'x',
+            .y = 'y',
+            .z = 'z',
+        },
+    });
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
@@ -809,7 +884,7 @@ test "print 2d array" {
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
+    try printer.printRaw(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
@@ -830,7 +905,7 @@ test "print array slices" {
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
+    try printer.printRaw(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
@@ -851,7 +926,7 @@ test "print slice arrays" {
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
+    try printer.printRaw(output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
@@ -870,7 +945,7 @@ test "print vertical slice" {
     var stream = std.io.fixedBufferStream(&buf);
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print(output);
+    try printer.printRaw(output);
     try testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
 
@@ -893,7 +968,7 @@ test "interact like an echo" {
             defer parsed.deinit();
             const input = parsed.value;
             const output = Output{ .s = input.s };
-            try printer.print(output);
+            try printer.printRaw(output);
         }
     };
 
