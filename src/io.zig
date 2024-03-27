@@ -269,19 +269,30 @@ pub fn Printer(comptime WriterType: type) type {
                 },
                 .Float => try self.writer.print("{d}", .{value}),
                 .Pointer => |p| {
-                    if (p.size != .Slice) @compileError("invalid type " ++ @typeName(T) ++ ", non-slice pointers are not supported for printing");
-                    switch (@typeInfo(p.child)) {
-                        .Pointer => |pp| {
-                            if (pp.size == .Slice)
-                                try self.printLs(p.child, value)
-                            else
-                                @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for printing");
+                    switch (p.size) {
+                        .One => {
+                            switch (@typeInfo(p.child)) {
+                                .Array => |a| try self.print(@as([]const a.child, value)),
+                                else => try self.print(@as(p.child, value.*)),
+                            }
                         },
-                        .Array => try self.printLs(p.child, value),
-                        else => if (p.child == u8)
-                            try self.writer.print("{s}", .{value})
-                        else
-                            try self.printWs(p.child, value),
+                        .Slice => {
+                            switch (@typeInfo(p.child)) {
+                                .Pointer => |pp| {
+                                    switch (pp.size) {
+                                        .One => try self.print(@as([]const p.child, value)),
+                                        .Slice => try self.printLs(p.child, value),
+                                        else => @compileError("invalid type " ++ @typeName(p.child) ++ ", not one or slice size pointers are not supported for printing"),
+                                    }
+                                },
+                                .Array => try self.printLs(p.child, value),
+                                else => if (p.child == u8)
+                                    try self.writer.print("{s}", .{value})
+                                else
+                                    try self.printWs(p.child, value),
+                            }
+                        },
+                        else => @compileError("invalid type " ++ @typeName(T) ++ ", not one or slice size pointers are not supported for printing"),
                     }
                 },
                 .Array => |a| try self.print(@as([]const a.child, &value)),
@@ -297,6 +308,8 @@ pub fn Printer(comptime WriterType: type) type {
                         if (i != s.fields.len - 1) _ = try self.writer.write(sep);
                     }
                 },
+                .ComptimeInt => try self.print(@as(usize, value)),
+                .ComptimeFloat => try self.print(@as(f64, value)),
                 else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for printing"),
             }
         }
@@ -748,6 +761,34 @@ test "print custom output" {
     const writer = stream.writer();
     var printer = Printer(@TypeOf(writer)).init(writer);
     try printer.print(output);
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "print comptime value" {
+    const expected =
+        \\1 2.3 hello
+    ;
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(.{ 1, 2.3, "hello" });
+    try testing.expectEqualStrings(expected, stream.getWritten());
+}
+
+test "print pointer of pointer" {
+    const expected =
+        \\1
+        \\2.3
+        \\a
+    ;
+    const Output = struct { i: i32, f: f64, c: u8 };
+    const output = Output{ .i = 1, .f = 2.3, .c = 'a' };
+    var buf: [4092]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const writer = stream.writer();
+    var printer = Printer(@TypeOf(writer)).init(writer);
+    try printer.print(&&output);
     try testing.expectEqualStrings(expected, stream.getWritten());
 }
 
