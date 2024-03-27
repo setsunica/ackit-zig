@@ -1,6 +1,6 @@
 .{
     .name = "ackit",
-    .version = "0.3.0",
+    .version = "0.4.0",
     .dependencies = .{
         .clap = .{
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.7.0.tar.gz",
