@@ -64,7 +64,7 @@ S
 ```zig
 const Output = struct { t: std.meta.Tuple(&.{i32, f64}), s: []const u8 };
 const output = Output{ .t = .{ 1, 2.3 }, .s = "abc" };
-try printer.print(output);
+try printer.print("{}", .{output});
 ```
 Since the output will have a new line for each field, you must use `std.meta.Tuple` to output multiple types of elements on a single line.
 If the type can be resolved by inference, an anonymous structure may be used to omit the definition of the `Output` structure.
@@ -83,7 +83,7 @@ fn solve(
     const input = input.value;
     // Implement your solution here.
     const output = ...
-    try printer.print(output);
+    try printer.print("{}", .{output});
 }
 ```
 
@@ -117,7 +117,7 @@ test "interact like an echo" {
             defer parsed.deinit();
             const input = parsed.value;
             const output = Output{ .s = input.s };
-            try printer.print(output);
+            try printer.print("{}", .{output});
         }
     };
 
