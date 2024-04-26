@@ -3,12 +3,12 @@
 
 
 ## Installation
-To install ackit, you'll need Zig version 0.11.0. You can install it with the following commands:
+To install ackit, you'll need Zig version 0.12.0. You can install it with the following commands:
 
 ```bash
 git clone https://github.com/setsunica/ackit-zig.git
 cd ackit-zig
-zig build -Doptimize=ReleaseSafe
+zig build --release=safe
 ```
 The executable will be generated in the zig-out/bin directory.
 

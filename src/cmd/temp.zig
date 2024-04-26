@@ -3,25 +3,46 @@ const log = std.log.scoped(.ackit);
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArgIterator = std.process.ArgIterator;
-const io_impl = @embedFile("../io.zig");
 const temp_text = @embedFile("temp.txt");
+const io_impl = @embedFile("../io.zig");
+const dp_impl = @embedFile("../dp.zig");
 const Dir = std.fs.Dir;
 const clap = @import("clap");
-const helper = @import("../helper.zig");
 
 pub const TempCmdError = error{
     NoOutputPathSpecified,
     OutputDirectoryPathUnidentified,
 };
 
+fn minifyOwned(allocator: Allocator, content: []const u8) ![]u8 {
+    const replaced = try std.mem.replaceOwned(u8, allocator, content, "\n", "");
+    return std.mem.collapseRepeats(u8, replaced, ' ');
+}
+
+fn appendImport(allocator: Allocator, temp: []const u8, lib_name: []const u8, impl: []const u8) ![]u8 {
+    const import_temp =
+        \\const {s} = struct {{ {s} }};
+    ;
+    const import_off_index = std.mem.indexOf(u8, impl, "// ackit import: off").?;
+    const impl_content = impl[0..import_off_index];
+    var result = try std.mem.replaceOwned(u8, allocator, impl_content,
+        \\const std = @import("std");
+    , "");
+    result = try minifyOwned(allocator, result);
+    result = try std.fmt.allocPrint(allocator, import_temp, .{ lib_name, result });
+    return try std.mem.concat(allocator, u8, &.{ temp, "\n", result });
+}
+
 pub const TempCmd = struct {
     arena: ArenaAllocator,
     output_path: []const u8,
+    import_dp: bool,
 
-    fn init(allocator: Allocator, output_path: []const u8) TempCmd {
+    fn init(allocator: Allocator, output_path: []const u8, import_dp: bool) TempCmd {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .output_path = output_path,
+            .import_dp = import_dp,
         };
     }
 
@@ -30,7 +51,7 @@ pub const TempCmd = struct {
     }
 
     pub fn run(self: *TempCmd) !void {
-        var allocator = self.arena.allocator();
+        const allocator = self.arena.allocator();
         const cwd = std.fs.cwd();
 
         const out_file_path = if (std.fs.path.isAbsolute(self.output_path))
@@ -58,25 +79,21 @@ pub const TempCmd = struct {
         defer out_file.close();
         var out_buffer = std.io.bufferedWriter(out_file.writer());
         const out_writer = out_buffer.writer();
-        const io_test_index = std.mem.indexOf(u8, io_impl, "// Below is the test code.").?;
-        var io_impl_trimed = io_impl[0..io_test_index];
+        var output = try appendImport(allocator, temp_text, "ackitio", io_impl);
 
-        io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed,
-            \\const std = @import("std");
-        , "");
+        if (self.import_dp) {
+            output = try appendImport(allocator, output, "dp", dp_impl);
+        }
 
-        io_impl_trimed = try std.mem.replaceOwned(u8, allocator, io_impl_trimed, "\n", "");
-        io_impl_trimed = try helper.mem.collapseScalarOwned(u8, allocator, io_impl_trimed, ' ');
-        const output = try std.mem.replaceOwned(u8, allocator, temp_text, "{{ACKIT_IO_IMPL}}", io_impl_trimed);
         try out_writer.writeAll(output);
         try out_buffer.flush();
         log.info("Template file `{s}` has been created.", .{out_file_path});
-        return;
     }
 };
 
 const options =
-    \\-h, --help    Display this help.
+    \\    -h, --help    Display this help.
+    \\        --dp      Imports dynamic planning libraries.
 ;
 
 const params = clap.parseParamsComptime(options ++
@@ -90,7 +107,7 @@ fn printUsage() !void {
         \\Usage: ackit temp <output_path> [option]
         \\
         \\Options:
-        \\    {s}
+        \\{s}
         \\
     , .{options});
 }
@@ -121,5 +138,7 @@ pub fn parse(allocator: Allocator, args: *ArgIterator) !?TempCmd {
         log.err("The output parameter is required.", .{});
         return TempCmdError.NoOutputPathSpecified;
     }
-    return TempCmd.init(allocator, res.positionals[0]);
+
+    const import_db = res.args.dp == 1;
+    return TempCmd.init(allocator, res.positionals[0], import_db);
 }
