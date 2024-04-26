@@ -8,7 +8,7 @@ fn solve(
     const parsed = try scanner.scanAllAlloc([]const u8, allocator);
     defer parsed.deinit();
     const input = parsed.value;
-    try printer.print(input);
+    try printer.print("{}", .{input});
 }
 
 pub fn main() !void {
@@ -18,4 +18,3 @@ pub fn main() !void {
 }
 
 // zig fmt: off
-const ackitio = struct { {{ACKIT_IO_IMPL}} };

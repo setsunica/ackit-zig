@@ -455,7 +455,7 @@ pub fn VerticalSlice(comptime T: type) type {
     };
 }
 
-// Below is the test code.
+// ackit import: off
 const testing = std.testing;
 
 test "read words" {

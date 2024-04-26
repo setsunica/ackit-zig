@@ -6,17 +6,18 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "ackit",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const clap_dep = b.dependency("clap", .{
-        .target = exe.target,
-        .optimize = exe.optimize,
-    });
+    if (b.lazyDependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    })) |clap_dep| {
+        exe.root_module.addImport("clap", clap_dep.module("clap"));
+    }
 
-    exe.addModule("clap", clap_dep.module("clap"));
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -29,7 +30,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
