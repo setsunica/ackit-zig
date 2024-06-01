@@ -45,10 +45,6 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             eval: W,
             visited: Visited,
 
-            pub fn deinit(self: *@This()) void {
-                self.visited.deinit();
-            }
-
             pub fn nodes(self: @This(), allocator: std.mem.Allocator) ![]T {
                 var rev_path = std.ArrayList(T).init(allocator);
                 var cur = self.visited.get(self.goal).?;
@@ -65,6 +61,18 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             }
         };
 
+        pub const SearchResult = union(enum) {
+            path: Path,
+            no_path: Visited,
+
+            pub fn deinit(self: *@This()) void {
+                switch (self.*) {
+                    .path => |*path| path.visited.deinit(),
+                    .no_path => |*visited| visited.deinit(),
+                }
+            }
+        };
+
         pub const BfsOptions = struct {
             queue_prealloc_item_count: usize = 128,
         };
@@ -74,11 +82,10 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             start: T,
             goal: T,
             comptime opts: BfsOptions,
-        ) !?Path {
-            if (!self.expand.contains(start)) return null;
-
+        ) !SearchResult {
             var visited = Visited.init(self.allocator);
             errdefer visited.deinit();
+            if (!self.expand.contains(start)) return .{ .no_path = visited };
             try visited.putNoClobber(start, undefined);
 
             var queue = std.SegmentedList(T, opts.queue_prealloc_item_count){};
@@ -89,12 +96,12 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             return search: while (i < queue.len) : (i += 1) {
                 const cur = queue.uncheckedAt(i).*;
                 if (cur == goal) {
-                    break :search .{
+                    break :search .{ .path = .{
                         .start = start,
                         .goal = goal,
                         .eval = undefined,
                         .visited = visited,
-                    };
+                    } };
                 }
                 var nexts = self.expand.get(cur) orelse continue;
                 var iter = nexts.iterator(0);
@@ -104,10 +111,7 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
                     breadcrumb.value_ptr.* = .{ .prev = cur, .eval = undefined };
                     try queue.append(self.allocator, next.node);
                 }
-            } else {
-                visited.deinit();
-                break :search null;
-            };
+            } else .{ .no_path = visited };
         }
 
         pub const DfsOptions = struct {
@@ -119,11 +123,10 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             start: T,
             goal: T,
             comptime opts: DfsOptions,
-        ) !?Path {
-            if (!self.expand.contains(start)) return null;
-
+        ) !SearchResult {
             var visited = Visited.init(self.allocator);
             errdefer visited.deinit();
+            if (!self.expand.contains(start)) return .{ .no_path = visited };
             try visited.putNoClobber(start, undefined);
 
             var stack = std.SegmentedList(T, opts.stack_prealloc_item_count){};
@@ -132,12 +135,12 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
 
             return search: while (stack.pop()) |cur| {
                 if (cur == goal) {
-                    break :search .{
+                    break :search .{ .path = .{
                         .start = start,
                         .goal = goal,
                         .eval = undefined,
                         .visited = visited,
-                    };
+                    } };
                 }
                 var nexts = self.expand.get(cur) orelse continue;
                 var iter = nexts.iterator(0);
@@ -147,10 +150,7 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
                     breadcrumb.value_ptr.* = .{ .prev = cur, .eval = undefined };
                     try stack.append(self.allocator, next.node);
                 }
-            } else {
-                visited.deinit();
-                break :search null;
-            };
+            } else .{ .no_path = visited };
         }
 
         pub const DijkstraOptions = struct {};
@@ -160,12 +160,11 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
             start: T,
             goal: T,
             opts: DijkstraOptions,
-        ) !?Path {
+        ) !SearchResult {
             _ = opts;
-            if (!self.expand.contains(start)) return null;
-
             var visited = Visited.init(self.allocator);
             errdefer visited.deinit();
+            if (!self.expand.contains(start)) return .{ .no_path = visited };
             try visited.putNoClobber(start, undefined);
 
             const Eval = struct { node: T, value: W };
@@ -181,12 +180,12 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
 
             return search: while (queue.removeOrNull()) |cur| {
                 if (cur.node == goal) {
-                    break :search .{
+                    break :search .{ .path = .{
                         .start = start,
                         .goal = goal,
                         .eval = visited.get(cur.node).?.eval,
                         .visited = visited,
-                    };
+                    } };
                 }
                 var nexts = self.expand.get(cur.node) orelse continue;
                 var iter = nexts.iterator(0);
@@ -200,31 +199,9 @@ pub fn Graph(comptime T: type, comptime W: type, comptime graph_opts: GraphOptio
                     } else breadcrumb.value_ptr.* = .{ .prev = cur.node, .eval = next_eval };
                     try queue.add(.{ .node = next.node, .value = next_eval });
                 }
-            } else {
-                visited.deinit();
-                break :search null;
-            };
+            } else .{ .no_path = visited };
         }
     };
-}
-
-pub fn main() !void {
-    std.debug.print("hogehoge", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const V = u32;
-    var graph = Graph(V, void, .{}).init(allocator);
-    defer graph.deinit();
-    try graph.put(1, 2, {});
-    try graph.put(2, 3, {});
-    try graph.put(2, 4, {});
-    try graph.put(4, 5, {});
-    var path = try graph.bfs(1, 5, .{});
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
-    defer allocator.free(nodes);
-    std.log.info("{}", .{std.mem.eql(V, &.{ 1, 2, 4, 5 }, nodes)});
 }
 
 // ackit import: off
@@ -239,10 +216,10 @@ test "bfs: simple" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    var path = try graph.bfs(1, 5, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.bfs(1, 5, .{});
+    defer result.deinit();
+    try testing.expect(result != .no_path);
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(V, &.{ 1, 2, 4, 5 }, nodes);
 }
@@ -256,10 +233,10 @@ test "bfs: start is goal" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    var path = try graph.bfs(1, 1, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.bfs(1, 1, .{});
+    try testing.expect(result != .no_path);
+    defer result.deinit();
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(V, &.{1}, nodes);
 }
@@ -273,12 +250,15 @@ test "bfs: there is no start or goal" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    const no_start_path = try graph.bfs(99, 5, .{});
-    try testing.expect(no_start_path == null);
-    const no_goal_path = try graph.bfs(1, 99, .{});
-    try testing.expect(no_goal_path == null);
-    const no_start_and_goal_path = try graph.bfs(99, 99, .{});
-    try testing.expect(no_start_and_goal_path == null);
+    var no_start_result = try graph.bfs(99, 5, .{});
+    defer no_start_result.deinit();
+    try testing.expect(no_start_result == .no_path);
+    var no_goal_result = try graph.bfs(1, 99, .{});
+    defer no_goal_result.deinit();
+    try testing.expect(no_goal_result == .no_path);
+    var no_start_and_goal_result = try graph.bfs(99, 99, .{});
+    defer no_start_and_goal_result.deinit();
+    try testing.expect(no_start_and_goal_result == .no_path);
 }
 
 test "dfs: simple" {
@@ -290,10 +270,10 @@ test "dfs: simple" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    var path = try graph.dfs(1, 5, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.dfs(1, 5, .{});
+    defer result.deinit();
+    try testing.expect(result != .no_path);
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(u32, &.{ 1, 2, 4, 5 }, nodes);
 }
@@ -307,10 +287,10 @@ test "dfs: start is goal" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    var path = try graph.dfs(1, 1, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.dfs(1, 1, .{});
+    defer result.deinit();
+    try testing.expect(result != .no_path);
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(V, &.{1}, nodes);
 }
@@ -324,12 +304,15 @@ test "dfs: there is no start or goal" {
     try graph.put(2, 3, {});
     try graph.put(2, 4, {});
     try graph.put(4, 5, {});
-    const no_start_path = try graph.dfs(99, 5, .{});
-    try testing.expect(no_start_path == null);
-    const no_goal_path = try graph.dfs(1, 99, .{});
-    try testing.expect(no_goal_path == null);
-    const no_start_and_goal_path = try graph.dfs(99, 99, .{});
-    try testing.expect(no_start_and_goal_path == null);
+    var no_start_result = try graph.dfs(99, 5, .{});
+    defer no_start_result.deinit();
+    try testing.expect(no_start_result == .no_path);
+    var no_goal_result = try graph.dfs(1, 99, .{});
+    defer no_goal_result.deinit();
+    try testing.expect(no_goal_result == .no_path);
+    var no_start_and_goal_result = try graph.dfs(99, 99, .{});
+    defer no_start_and_goal_result.deinit();
+    try testing.expect(no_start_and_goal_result == .no_path);
 }
 
 test "dijkstra: simple" {
@@ -343,13 +326,13 @@ test "dijkstra: simple" {
     try graph.put(2, 4, 12);
     try graph.put(3, 5, 13);
     try graph.put(4, 5, 14);
-    var path = try graph.dijkstra(1, 5, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.dijkstra(1, 5, .{});
+    defer result.deinit();
+    try testing.expect(result != .no_path);
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(u32, &.{ 1, 2, 3, 5 }, nodes);
-    try testing.expectEqual(@as(V, 34), path.?.eval);
+    try testing.expectEqual(@as(V, 34), result.path.eval);
 }
 
 test "dijkstra: start is goal" {
@@ -362,10 +345,10 @@ test "dijkstra: start is goal" {
     try graph.put(2, 3, 12);
     try graph.put(2, 4, 13);
     try graph.put(4, 5, 14);
-    var path = try graph.dijkstra(1, 1, .{});
-    try testing.expect(path != null);
-    defer path.?.deinit();
-    const nodes = try path.?.nodes(allocator);
+    var result = try graph.dijkstra(1, 1, .{});
+    defer result.deinit();
+    try testing.expect(result != .no_path);
+    const nodes = try result.path.nodes(allocator);
     defer allocator.free(nodes);
     try testing.expectEqualSlices(V, &.{1}, nodes);
 }
@@ -380,10 +363,13 @@ test "dijkstra: there is no start or goal" {
     try graph.put(2, 3, 12);
     try graph.put(2, 4, 13);
     try graph.put(4, 5, 14);
-    const no_start_path = try graph.dijkstra(99, 5, .{});
-    try testing.expect(no_start_path == null);
-    const no_goal_path = try graph.dijkstra(1, 99, .{});
-    try testing.expect(no_goal_path == null);
-    const no_start_and_goal_path = try graph.dijkstra(99, 99, .{});
-    try testing.expect(no_start_and_goal_path == null);
+    var no_start_result = try graph.dijkstra(99, 5, .{});
+    defer no_start_result.deinit();
+    try testing.expect(no_start_result == .no_path);
+    var no_goal_result = try graph.dijkstra(1, 99, .{});
+    defer no_goal_result.deinit();
+    try testing.expect(no_goal_result == .no_path);
+    var no_start_and_goal_result = try graph.dijkstra(99, 99, .{});
+    defer no_start_and_goal_result.deinit();
+    try testing.expect(no_start_and_goal_result == .no_path);
 }
