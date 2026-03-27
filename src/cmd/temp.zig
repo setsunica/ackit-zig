@@ -24,18 +24,34 @@ fn minifyOwned(allocator: Allocator, content: []const u8) ![]u8 {
     return mem.collapseRepeats(u8, replaced, ' ');
 }
 
-fn appendImport(allocator: Allocator, temp: []const u8, lib_name: []const u8, impl: []const u8) ![]u8 {
+fn appendImport(allocator: Allocator, arr: *std.ArrayList(u8), lib_name: []const u8, impl: []const u8) !void {
     const import_temp =
-        \\const {s} = struct {{ {s} }};
+        \\const {s} = struct {{ {s} }}; 
     ;
     const import_off_index = mem.indexOf(u8, impl, "// ackit import: off").?;
     const impl_content = impl[0..import_off_index];
-    var result = try mem.replaceOwned(u8, allocator, impl_content,
+    const tmp1 = try mem.replaceOwned(u8, allocator, impl_content,
         \\const std = @import("std");
     , "");
-    result = try minifyOwned(allocator, result);
-    result = try fmt.allocPrint(allocator, import_temp, .{ lib_name, result });
-    return try mem.concat(allocator, u8, &.{ temp, "\n", result });
+    defer allocator.free(tmp1);
+    const tmp2 = try minifyOwned(allocator, tmp1);
+    defer allocator.free(tmp2);
+    const tmp3 = try fmt.allocPrint(allocator, import_temp, .{ lib_name, tmp2 });
+    defer allocator.free(tmp3);
+    try arr.appendSlice(allocator, tmp3);
+}
+
+fn createOutput(allocator: Allocator, import_dp: bool) ![]u8 {
+    var arr = std.ArrayList(u8).empty;
+    errdefer arr.deinit(allocator);
+    try arr.print(allocator, "{s}\n{s}", .{ temp_text, "const ackit = struct {" });
+    try appendImport(allocator, &arr, "io", io_impl);
+
+    if (import_dp) {
+        try appendImport(allocator, &arr, "dp", dp_impl);
+    }
+    try arr.appendSlice(allocator, "};");
+    return arr.toOwnedSlice(allocator);
 }
 
 pub const TempCmd = struct {
@@ -85,12 +101,8 @@ pub const TempCmd = struct {
         var buf: [4096]u8 = undefined;
         var out_file_writer = out_file.writer(&buf);
         const writer = &out_file_writer.interface;
-        var output = try appendImport(allocator, temp_text, "ackitio", io_impl);
-
-        if (self.import_dp) {
-            output = try appendImport(allocator, output, "dp", dp_impl);
-        }
-
+        const output = try createOutput(allocator, self.import_dp);
+        errdefer allocator.free(output);
         try writer.writeAll(output);
         try writer.flush();
         log.info("Template file `{s}` has been created.", .{out_file_path});

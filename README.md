@@ -90,7 +90,7 @@ fn solve(
 
 ## Testing Input and Output
 You can use the `ackitio.interact` function to test input and output using custom `std.io.Reader` and `std.io.Writer`.
-Note that Zig version 0.10.1 is required to run the test. This equals the version used by AtCoder as of January 2, 2024.
+Note that Zig version 0.15.1 is required to run the test. This equals the version used by AtCoder as of March 28, 2026.
 
 
 ### Example Test
@@ -100,34 +100,30 @@ Here's an example test:
 test "interact like an echo" {
     const Input = struct { s: []const u8 };
     const Output = struct { s: []const u8 };
-    var input_buf = "Hello\n";
-    var output_buf: [input_buf.len]u8 = undefined;
-    var input_stream = std.io.fixedBufferStream(input_buf);
-    var output_stream = std.io.fixedBufferStream(&output_buf);
-    const reader = input_stream.reader();
-    const writer = output_stream.writer();
-
+    const input_buf = "Hello\n";
+    var output_buf: [input_buf.len + 1]u8 = undefined;
+    var reader = std.io.Reader.fixed(input_buf);
+    var writer = std.io.Writer.fixed(&output_buf);
     const s = struct {
         fn echo(
-            allocator: std.mem.Allocator,
-            scanner: *ackitio.Scanner(@TypeOf(reader)),
-            printer: *ackitio.Printer(@TypeOf(writer)),
+            allocator: mem.Allocator,
+            scanner: *ackit.io.Scanner,
+            printer: *ackit.io.Printer,
         ) !void {
             const parsed = try scanner.scanAllAlloc(Input, allocator);
             defer parsed.deinit();
             const input = parsed.value;
             const output = Output{ .s = input.s };
-            try printer.print("{}", .{output});
+            try printer.printRaw(output);
         }
     };
 
-    try ackitio.interact(
-        std.testing.allocator,
-        reader,
-        writer,
+    try ackit.io.interact(
+        testing.allocator,
+        &reader,
+        &writer,
         s.echo,
     );
-
-    try std.testing.expectEqualStrings(input_buf, &output_buf);
+    try testing.expectEqualStrings(input_buf, output_buf[0..input_buf.len]);
 }
 ```

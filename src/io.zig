@@ -1,11 +1,13 @@
 const std = @import("std");
-pub const StdinReader = std.io.BufferedReader(4096, std.fs.File.Reader).Reader;
-pub const StdoutWriter = std.io.BufferedWriter(4096, std.fs.File.Writer).Writer;
+const fs = std.fs;
+const heap = std.heap;
+const mem = std.mem;
+const meta = std.meta;
 
 const f_max_size = 512 * 1024 * 1024;
-const l_max_size = 128 * 1024 * 1024;
 const l_delim = '\n';
 const l_token = "\n";
+const w_delim = ' ';
 const w_token = " ";
 const scan_fn_decl_name = "scanAlloc";
 const scan_fixed_size_fn_decl_name = "scanFixedSizeAlloc";
@@ -20,10 +22,10 @@ pub const ScanError = error{
 
 fn Parsed(comptime T: type) type {
     return struct {
-        arena: std.heap.ArenaAllocator,
+        arena: heap.ArenaAllocator,
         value: T,
 
-        fn init(arena: std.heap.ArenaAllocator, value: T) Parsed(T) {
+        fn init(arena: heap.ArenaAllocator, value: T) Parsed(T) {
             return .{ .arena = arena, .value = value };
         }
 
@@ -34,12 +36,13 @@ fn Parsed(comptime T: type) type {
 }
 
 const Cursor = struct {
-    l_iter: std.mem.TokenIterator(u8),
-    w_iter: std.mem.TokenIterator(u8),
+    const Iter = mem.TokenIterator(u8, .scalar);
+    l_iter: Iter,
+    w_iter: Iter,
 
     fn init(source: []const u8) Cursor {
-        var l_iter = std.mem.tokenize(u8, source, l_token);
-        var w_iter = std.mem.tokenize(u8, l_iter.next() orelse "", w_token);
+        var l_iter = mem.tokenizeScalar(u8, source, l_delim);
+        const w_iter = mem.tokenizeScalar(u8, l_iter.next() orelse "", w_delim);
         return .{
             .l_iter = l_iter,
             .w_iter = w_iter,
@@ -47,27 +50,27 @@ const Cursor = struct {
     }
 
     fn setSource(self: *Cursor, source: []const u8) void {
-        self.l_iter = std.mem.tokenize(u8, source, l_token);
-        self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
+        self.l_iter = mem.tokenizeScalar(u8, source, l_delim);
+        self.w_iter = mem.tokenizeScalar(u8, self.l_iter.next() orelse "", w_delim);
     }
 
     fn nextW(self: *Cursor) ?[]const u8 {
         return if (self.w_iter.next()) |w|
             w
         else if (self.l_iter.next()) |l| blk: {
-            self.w_iter = std.mem.tokenize(u8, l, w_token);
+            self.w_iter = mem.tokenizeScalar(u8, l, w_delim);
             break :blk self.nextW();
         } else null;
     }
 
-    fn nextL(self: *Cursor) ?std.mem.TokenIterator(u8) {
+    fn nextL(self: *Cursor) ?Iter {
         return if (self.w_iter.peek()) |_| blk: {
-            var ws = self.w_iter;
-            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
+            const ws = self.w_iter;
+            self.w_iter = mem.tokenizeScalar(u8, self.l_iter.next() orelse "", w_delim);
             break :blk ws;
         } else if (self.l_iter.next()) |l| blk: {
-            var ws = std.mem.tokenize(u8, l, w_token);
-            self.w_iter = std.mem.tokenize(u8, self.l_iter.next() orelse "", w_token);
+            const ws = mem.tokenizeScalar(u8, l, w_delim);
+            self.w_iter = mem.tokenizeScalar(u8, self.l_iter.next() orelse "", w_delim);
             break :blk ws;
         } else null;
     }
@@ -75,344 +78,341 @@ const Cursor = struct {
     fn countRestW(self: *Cursor) usize {
         if (self.w_iter.peek() == null) {
             const l = self.l_iter.next() orelse return 0;
-            self.w_iter = std.mem.tokenize(u8, l, w_token);
+            self.w_iter = mem.tokenizeScalar(u8, l, w_delim);
         }
         const rest = self.w_iter.rest();
         if (rest.len == 0) return 0;
-        return std.mem.count(u8, rest, w_token) + 1;
+        return mem.count(u8, rest, w_token) + 1;
     }
 };
 
-pub fn Scanner(comptime ReaderType: type) type {
-    return struct {
-        const Self = @This();
-        reader: ReaderType,
-        cursor: Cursor,
+pub const Scanner = struct {
+    const Self = @This();
+    reader: *std.io.Reader,
+    cursor: Cursor,
 
-        fn init(reader: ReaderType) Self {
-            return .{
-                .reader = reader,
-                .cursor = Cursor.init(""),
-            };
-        }
+    fn init(reader: *std.io.Reader) Self {
+        return .{
+            .reader = reader,
+            .cursor = Cursor.init(""),
+        };
+    }
 
-        inline fn hasScanAllocFn(comptime T: type) bool {
-            return @hasDecl(T, scan_fn_decl_name) and !@hasDecl(T, size_field_name_decl_name);
-        }
+    inline fn hasScanAllocFn(comptime T: type) bool {
+        return @hasDecl(T, scan_fn_decl_name) and !@hasDecl(T, size_field_name_decl_name);
+    }
 
-        inline fn hasScanFixedSizeAllocFn(comptime T: type) bool {
-            return @hasDecl(T, scan_fixed_size_fn_decl_name) and @hasDecl(T, size_field_name_decl_name);
-        }
+    inline fn hasScanFixedSizeAllocFn(comptime T: type) bool {
+        return @hasDecl(T, scan_fixed_size_fn_decl_name) and @hasDecl(T, size_field_name_decl_name);
+    }
 
-        fn scanRaw(self: *Self, comptime T: type, allocator: ?std.mem.Allocator) !T {
-            return switch (@typeInfo(T)) {
-                .Int => |i| blk: {
-                    const w = self.cursor.nextW() orelse return ScanError.NoNextWord;
-                    break :blk if (i.bits == 8 and i.signedness == .unsigned)
-                        w[0]
+    fn scanRaw(self: *Self, comptime T: type, allocator: ?mem.Allocator) !T {
+        return switch (@typeInfo(T)) {
+            .int => |i| blk: {
+                const w = self.cursor.nextW() orelse return ScanError.NoNextWord;
+                break :blk if (i.bits == 8 and i.signedness == .unsigned)
+                    w[0]
+                else
+                    std.fmt.parseInt(@Type(.{ .int = i }), w, 10);
+            },
+            .float => |f| blk: {
+                const w = self.cursor.nextW() orelse return ScanError.NoNextWord;
+                break :blk try std.fmt.parseFloat(@Type(.{ .float = f }), w);
+            },
+            .pointer => |p| blk: {
+                if (p.size != .slice) @compileError("invalid type " ++ @typeName(T) ++ ", non-slice pointers are not supported for scanning");
+                if (p.child == u8) return self.cursor.nextW() orelse return ScanError.NoNextWord;
+                break :blk switch (@typeInfo(p.child)) {
+                    .pointer => |pp| if (pp.size == .slice)
+                        try self.scanSlices(pp.child, allocator.?)
                     else
-                        std.fmt.parseInt(@Type(.{ .Int = i }), w, 10);
-                },
-                .Float => |f| blk: {
-                    const w = self.cursor.nextW() orelse return ScanError.NoNextWord;
-                    break :blk try std.fmt.parseFloat(@Type(.{ .Float = f }), w);
-                },
-                .Pointer => |p| blk: {
-                    if (p.size != .Slice) @compileError("invalid type " ++ @typeName(T) ++ ", non-slice pointers are not supported for scanning");
-                    if (p.child == u8) return self.cursor.nextW() orelse return ScanError.NoNextWord;
-                    break :blk switch (@typeInfo(p.child)) {
-                        .Pointer => |pp| if (pp.size == .Slice)
-                            try self.scanSlices(pp.child, allocator.?)
-                        else
-                            @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
-                        .Array => try self.scanArrays(p.child, allocator.?),
-                        else => try self.scanSlice(p.child, allocator.?) orelse ScanError.NoNextLine,
-                    };
-                },
-                .Array => try self.scanArray(T, allocator) orelse ScanError.NoNextWord,
-                .Struct => |s| blk: {
-                    if (hasScanAllocFn(T)) {
-                        break :blk try T.scanAlloc(ReaderType, allocator.?, self);
-                    }
-                    var v: T = undefined;
-                    inline for (s.fields) |field| {
-                        const field_type = field.field_type;
-                        const is_struct = @typeInfo(field_type) == .Struct;
-                        if (is_struct and hasScanFixedSizeAllocFn(field_type)) {
-                            const size = @field(v, field_type.size_field_name);
-                            @field(v, field.name) = try field_type.scanFixedSizeAlloc(ReaderType, allocator.?, self, size);
-                        } else {
-                            @field(v, field.name) = try self.scanRaw(field_type, allocator);
-                        }
-                    }
-                    break :blk v;
-                },
-                .Optional => |o| self.scanRaw(o.child, allocator) catch return null,
-                else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for scanning"),
-            };
-        }
-
-        fn scanSlice(self: *Self, comptime T: type, allocator: std.mem.Allocator) !?[]T {
-            const restCount = self.cursor.countRestW();
-            if (restCount == 0) return null;
-            var arr = std.ArrayList(T).init(allocator);
-            var i: usize = 0;
-            while (i < restCount) : (i += 1) {
-                const v = try self.scanRaw(T, allocator);
-                try arr.append(v);
-            }
-            return arr.toOwnedSlice();
-        }
-
-        fn scanSlices(self: *Self, comptime T: type, allocator: std.mem.Allocator) ![][]T {
-            var arr = std.ArrayList([]T).init(allocator);
-            while (try self.scanSlice(T, allocator)) |vs| {
-                try arr.append(vs);
-            }
-            return arr.toOwnedSlice();
-        }
-
-        fn scanArray(self: *Self, comptime Array: type, allocator: ?std.mem.Allocator) !?Array {
-            const restCount = self.cursor.countRestW();
-            if (restCount == 0) return null;
-            const a = @typeInfo(Array).Array;
-            if (a.child == u8) {
-                const s = self.cursor.nextW().?;
-                if (s.len < a.len) {
-                    return ScanError.InvalidArraySize;
+                        @compileError("invalid type " ++ @typeName(p.child) ++ ", non-slice pointers are not supported for scanning"),
+                    .array => try self.scanArrays(p.child, allocator.?),
+                    else => try self.scanSlice(p.child, allocator.?) orelse ScanError.NoNextLine,
+                };
+            },
+            .array => try self.scanArray(T, allocator) orelse ScanError.NoNextWord,
+            .@"struct" => |s| blk: {
+                if (hasScanAllocFn(T)) {
+                    break :blk try T.scanAlloc(allocator.?, self);
                 }
-                return s[0..a.len].*;
-            }
-            var r: [a.len]a.child = undefined;
-            var i: usize = 0;
-            while (i < a.len) : (i += 1) {
-                r[i] = try self.scanRaw(a.child, allocator);
-            }
-            return r;
-        }
-
-        fn scanArrays(self: *Self, comptime Array: type, allocator: std.mem.Allocator) ![]Array {
-            var arrs = std.ArrayList(Array).init(allocator);
-            while (try self.scanArray(Array, allocator)) |arr| {
-                try arrs.append(arr);
-            }
-            return arrs.toOwnedSlice();
-        }
-
-        fn isAllocatorRequired(comptime T: type) bool {
-            return switch (@typeInfo(T)) {
-                .Int, .Float => false,
-                .Pointer => true,
-                .Array => |arr| isAllocatorRequired(arr.child),
-                .Struct => |s| blk: {
-                    if (hasScanAllocFn(T)) break :blk true;
-                    inline for (s.fields) |field| {
-                        const field_type = field.field_type;
-                        const is_struct = @typeInfo(field_type) == .Struct;
-                        if ((is_struct and hasScanFixedSizeAllocFn(field.field_type)) or
-                            isAllocatorRequired(field.field_type)) break :blk true;
+                var v: T = undefined;
+                inline for (s.fields) |field| {
+                    const is_struct = @typeInfo(field.type) == .@"struct";
+                    if (is_struct and hasScanFixedSizeAllocFn(field.type)) {
+                        const size = @field(v, field.type.size_field_name);
+                        @field(v, field.name) = try field.type.scanFixedSizeAlloc(allocator.?, self, size);
+                    } else {
+                        @field(v, field.name) = try self.scanRaw(field.type, allocator);
                     }
-                    break :blk false;
-                },
-                .Optional => |o| isAllocatorRequired(o.child),
-                else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for scanning"),
-            };
-        }
-
-        pub fn scanAllAlloc(self: *Self, comptime T: type, allocator: std.mem.Allocator) !Parsed(T) {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const arena_allocator = arena.allocator();
-            const source = try self.reader.readAllAlloc(arena_allocator, f_max_size);
-            self.cursor.setSource(source);
-            const v = try self.scanRaw(T, arena_allocator);
-            return Parsed(T).init(arena, v);
-        }
-
-        pub fn scanLineAlloc(self: *Self, comptime T: type, allocator: std.mem.Allocator) !Parsed(T) {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            errdefer arena.deinit();
-            const arena_allocator = arena.allocator();
-            const source = try self.reader.readUntilDelimiterOrEofAlloc(arena_allocator, l_delim, l_max_size) orelse return ScanError.NoNextWord;
-            self.cursor.setSource(source);
-            const v = try self.scanRaw(T, arena_allocator);
-            return Parsed(T).init(arena, v);
-        }
-
-        pub fn scanLine(self: *Self, comptime T: type, buf: []u8) !T {
-            comptime if (isAllocatorRequired(T)) @compileError("invalid type " ++ @typeName(T) ++ " for scanLine, use scanLineAlloc instead");
-            const source = try self.reader.readUntilDelimiterOrEof(buf, l_delim) orelse return ScanError.NoNextWord;
-            self.cursor.setSource(source);
-            return try self.scanRaw(T, null);
-        }
-    };
-}
-
-pub fn Printer(comptime WriterType: type) type {
-    return struct {
-        const Self = @This();
-        writer: WriterType,
-
-        fn init(writer: WriterType) Printer(WriterType) {
-            return .{ .writer = writer };
-        }
-
-        fn Packet(comptime T: type) type {
-            return struct {
-                printer: *Self,
-                value: T,
-
-                pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-                    _ = fmt;
-                    _ = options;
-                    _ = writer;
-                    try self.printer.printRaw(self.value);
                 }
-            };
+                break :blk v;
+            },
+            .optional => |o| self.scanRaw(o.child, allocator) catch return null,
+            else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for scanning"),
+        };
+    }
+
+    fn scanSlice(self: *Self, comptime T: type, allocator: mem.Allocator) !?[]T {
+        const restCount = self.cursor.countRestW();
+        if (restCount == 0) return null;
+        var arr = std.ArrayList(T).empty;
+        errdefer arr.deinit(allocator);
+        var i: usize = 0;
+        while (i < restCount) : (i += 1) {
+            const v = try self.scanRaw(T, allocator);
+            try arr.append(allocator, v);
         }
+        return try arr.toOwnedSlice(allocator);
+    }
 
-        pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
-            const fields = std.meta.fields(@TypeOf(args));
-            comptime var packet_types: [fields.len]type = undefined;
+    fn scanSlices(self: *Self, comptime T: type, allocator: mem.Allocator) ![][]T {
+        var arr = std.ArrayList([]T).empty;
+        errdefer arr.deinit(allocator);
+        while (try self.scanSlice(T, allocator)) |vs| {
+            try arr.append(allocator, vs);
+        }
+        return arr.toOwnedSlice(allocator);
+    }
 
-            const Runtime = struct {
-                fn Type(comptime T: type) type {
-                    return switch (@typeInfo(T)) {
-                        .ComptimeInt => isize,
-                        .ComptimeFloat => f64,
-                        else => T,
-                    };
-                }
-            };
-
-            comptime var i: usize = 0;
-
-            inline while (i < fields.len) : (i += 1) {
-                packet_types[i] = Packet(Runtime.Type(fields[i].field_type));
+    fn scanArray(self: *Self, comptime Array: type, allocator: ?mem.Allocator) !?Array {
+        const restCount = self.cursor.countRestW();
+        if (restCount == 0) return null;
+        const a = @typeInfo(Array).array;
+        if (a.child == u8) {
+            const s = self.cursor.nextW().?;
+            if (s.len < a.len) {
+                return ScanError.InvalidArraySize;
             }
+            return s[0..a.len].*;
+        }
+        var r: [a.len]a.child = undefined;
+        var i: usize = 0;
+        while (i < a.len) : (i += 1) {
+            r[i] = try self.scanRaw(a.child, allocator);
+        }
+        return r;
+    }
 
-            const Packets = std.meta.Tuple(&packet_types);
-            var packets: Packets = undefined;
+    fn scanArrays(self: *Self, comptime Array: type, allocator: mem.Allocator) ![]Array {
+        var arrs = std.ArrayList(Array).empty;
+        errdefer arrs.deinit(allocator);
+        while (try self.scanArray(Array, allocator)) |arr| {
+            try arrs.append(allocator, arr);
+        }
+        return arrs.toOwnedSlice(allocator);
+    }
 
-            inline for (fields) |field| {
-                @field(packets, field.name) = Packet(Runtime.Type(field.field_type)){
-                    .printer = self,
-                    .value = @field(args, field.name),
+    fn isAllocatorRequired(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .int, .float => false,
+            .pointer => true,
+            .array => |arr| isAllocatorRequired(arr.child),
+            .@"struct" => |s| blk: {
+                if (hasScanAllocFn(T)) break :blk true;
+                inline for (s.fields) |field| {
+                    const is_struct = @typeInfo(field.type) == .@"struct";
+                    if ((is_struct and hasScanFixedSizeAllocFn(field.type)) or
+                        isAllocatorRequired(field.type)) break :blk true;
+                }
+                break :blk false;
+            },
+            .optional => |o| isAllocatorRequired(o.child),
+            else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for scanning"),
+        };
+    }
+
+    pub fn scanAllAlloc(self: *Self, comptime T: type, allocator: mem.Allocator) !Parsed(T) {
+        var arena = heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const source = try self.reader.allocRemaining(arena_allocator, .limited(f_max_size));
+        self.cursor.setSource(source);
+        const v = try self.scanRaw(T, arena_allocator);
+        return Parsed(T).init(arena, v);
+    }
+
+    pub fn scanLineAlloc(self: *Self, comptime T: type, allocator: mem.Allocator) !Parsed(T) {
+        var arena = heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        const source = self.reader.takeDelimiter(l_delim) catch |err| switch (err) {
+            error.StreamTooLong => self.reader.buffered(),
+            else => return err,
+        } orelse return ScanError.NoNextWord;
+        self.cursor.setSource(source);
+        const v = try self.scanRaw(T, arena_allocator);
+        return Parsed(T).init(arena, v);
+    }
+
+    pub fn scanLine(self: *Self, comptime T: type) !T {
+        comptime if (isAllocatorRequired(T)) @compileError("invalid type " ++ @typeName(T) ++ " for scanLine, use scanLineAlloc instead");
+        const source = self.reader.takeDelimiter(l_delim) catch |err| switch (err) {
+            error.StreamTooLong => self.reader.buffered(),
+            else => return err,
+        } orelse return ScanError.NoNextWord;
+        self.cursor.setSource(source);
+        return try self.scanRaw(T, null);
+    }
+};
+
+pub const Printer = struct {
+    const Self = @This();
+    writer: *std.io.Writer,
+
+    fn init(writer: *std.io.Writer) Printer {
+        return .{ .writer = writer };
+    }
+
+    fn Packet(comptime T: type) type {
+        return struct {
+            printer: *Self,
+            value: T,
+
+            pub fn format(self: @This(), writer: *std.io.Writer) !void {
+                _ = writer;
+                try self.printer.printRaw(self.value);
+            }
+        };
+    }
+
+    pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        const fields = meta.fields(@TypeOf(args));
+        comptime var packet_types: [fields.len]type = undefined;
+
+        const Runtime = struct {
+            fn Type(comptime T: type) type {
+                return switch (@typeInfo(T)) {
+                    .comptime_int => isize,
+                    .comptime_float => f64,
+                    else => T,
                 };
             }
+        };
 
-            try std.fmt.format(self.writer, fmt, packets);
+        comptime var i: usize = 0;
+
+        inline while (i < fields.len) : (i += 1) {
+            packet_types[i] = Packet(Runtime.Type(fields[i].type));
         }
 
-        fn printRaw(self: *Self, value: anytype) !void {
-            const T = @TypeOf(value);
-            switch (@typeInfo(T)) {
-                .Int => |i| {
-                    if (i.bits == 8 and i.signedness == .unsigned) {
-                        _ = try self.writer.writeByte(value);
-                    } else {
-                        try self.writer.print("{d}", .{value});
-                    }
-                },
-                .Float => try self.writer.print("{d}", .{value}),
-                .Pointer => |p| {
-                    switch (p.size) {
-                        .One => {
-                            switch (@typeInfo(p.child)) {
-                                .Array => |a| try self.printRaw(@as([]const a.child, value)),
-                                else => try self.printRaw(@as(p.child, value.*)),
-                            }
-                        },
-                        .Slice => {
-                            switch (@typeInfo(p.child)) {
-                                .Pointer => |pp| {
-                                    switch (pp.size) {
-                                        .One => try self.printRaw(@as([]const p.child, value)),
-                                        .Slice => try self.printLs(p.child, value),
-                                        else => @compileError("invalid type " ++ @typeName(p.child) ++ ", not one or slice size pointers are not supported for printing"),
-                                    }
-                                },
-                                .Array => try self.printLs(p.child, value),
-                                else => if (p.child == u8)
-                                    try self.writer.print("{s}", .{value})
-                                else
-                                    try self.printWs(p.child, value),
-                            }
-                        },
-                        else => @compileError("invalid type " ++ @typeName(T) ++ ", not one or slice size pointers are not supported for printing"),
-                    }
-                },
-                .Array => |a| try self.printRaw(@as([]const a.child, &value)),
-                .Struct => |s| {
-                    if (@hasDecl(T, print_fn_decl_name)) {
-                        return try value.print(WriterType, self);
-                    }
-                    comptime var i: usize = 0;
-                    const sep = if (s.is_tuple) w_token else l_token;
-                    inline while (i < s.fields.len) : (i += 1) {
-                        const field = s.fields[i];
-                        try self.printRaw(@field(value, field.name));
-                        if (i != s.fields.len - 1) _ = try self.writer.write(sep);
-                    }
-                },
-                .ComptimeInt => try self.printRaw(@as(isize, value)),
-                .ComptimeFloat => try self.printRaw(@as(f64, value)),
-                else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for printing"),
-            }
+        const Packets = meta.Tuple(&packet_types);
+        var packets: Packets = undefined;
+
+        inline for (fields) |field| {
+            @field(packets, field.name) = Packet(Runtime.Type(field.type)){
+                .printer = self,
+                .value = @field(args, field.name),
+            };
         }
 
-        fn printChildren(self: *Self, comptime Child: type, value: []const Child, sep: []const u8) !void {
-            var i: usize = 0;
-            while (i < value.len) : (i += 1) {
-                try self.printRaw(value[i]);
-                if (i != value.len - 1) {
-                    _ = try self.writer.write(sep);
+        try self.writer.print(fmt, packets);
+    }
+
+    fn printRaw(self: *Self, value: anytype) !void {
+        const T = @TypeOf(value);
+        switch (@typeInfo(T)) {
+            .int => |i| {
+                if (i.bits == 8 and i.signedness == .unsigned) {
+                    _ = try self.writer.writeByte(value);
+                } else {
+                    try self.writer.print("{d}", .{value});
                 }
+            },
+            .float => try self.writer.print("{d}", .{value}),
+            .pointer => |p| {
+                switch (p.size) {
+                    .one => {
+                        switch (@typeInfo(p.child)) {
+                            .array => |a| try self.printRaw(@as([]const a.child, value)),
+                            else => try self.printRaw(@as(p.child, value.*)),
+                        }
+                    },
+                    .slice => {
+                        switch (@typeInfo(p.child)) {
+                            .pointer => |pp| {
+                                switch (pp.size) {
+                                    .one => try self.printRaw(@as([]const p.child, value)),
+                                    .slice => try self.printLs(p.child, value),
+                                    else => @compileError("invalid type " ++ @typeName(p.child) ++ ", not one or slice size pointers are not supported for printing"),
+                                }
+                            },
+                            .array => try self.printLs(p.child, value),
+                            else => if (p.child == u8)
+                                try self.writer.print("{s}", .{value})
+                            else
+                                try self.printWs(p.child, value),
+                        }
+                    },
+                    else => @compileError("invalid type " ++ @typeName(T) ++ ", not one or slice size pointers are not supported for printing"),
+                }
+            },
+            .array => |a| try self.printRaw(@as([]const a.child, &value)),
+            .@"struct" => |s| {
+                if (@hasDecl(T, print_fn_decl_name)) {
+                    return try value.print(self);
+                }
+                comptime var i: usize = 0;
+                const sep = if (s.is_tuple) w_delim else l_delim;
+                inline while (i < s.fields.len) : (i += 1) {
+                    const field = s.fields[i];
+                    try self.printRaw(@field(value, field.name));
+                    if (i != s.fields.len - 1) try self.writer.writeByte(sep);
+                }
+            },
+            .comptime_int => try self.printRaw(@as(isize, value)),
+            .comptime_float => try self.printRaw(@as(f64, value)),
+            else => @compileError("invalid type " ++ @typeName(T) ++ ", unsupported types for printing"),
+        }
+    }
+
+    fn printChildren(self: *Self, comptime Child: type, value: []const Child, sep: u8) !void {
+        var i: usize = 0;
+        while (i < value.len) : (i += 1) {
+            try self.printRaw(value[i]);
+            if (i != value.len - 1) {
+                try self.writer.writeByte(sep);
             }
         }
+    }
 
-        inline fn printWs(self: *Self, comptime Child: type, value: []const Child) !void {
-            try self.printChildren(Child, value, w_token);
-        }
+    inline fn printWs(self: *Self, comptime Child: type, value: []const Child) !void {
+        try self.printChildren(Child, value, w_delim);
+    }
 
-        inline fn printLs(self: *Self, comptime Child: type, value: []const Child) !void {
-            try self.printChildren(Child, value, l_token);
-        }
-    };
-}
+    inline fn printLs(self: *Self, comptime Child: type, value: []const Child) !void {
+        try self.printChildren(Child, value, l_delim);
+    }
+};
 
 pub fn interact(
-    allocator: std.mem.Allocator,
-    reader: anytype,
-    writer: anytype,
-    comptime solver: fn (
-        std.mem.Allocator,
-        *Scanner(@TypeOf(reader)),
-        *Printer(@TypeOf(writer)),
-    ) anyerror!void,
+    allocator: mem.Allocator,
+    reader: *std.io.Reader,
+    writer: *std.io.Writer,
+    comptime solver: fn (mem.Allocator, *Scanner, *Printer) anyerror!void,
 ) !void {
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var scanner = Scanner.init(reader);
+    var printer = Printer.init(writer);
     try solver(allocator, &scanner, &printer);
     try printer.printRaw(l_token);
+    try writer.flush();
 }
 
 pub fn interactStdio(
-    allocator: std.mem.Allocator,
+    allocator: mem.Allocator,
     comptime solver: fn (
-        std.mem.Allocator,
-        *Scanner(StdinReader),
-        *Printer(StdoutWriter),
+        mem.Allocator,
+        *Scanner,
+        *Printer,
     ) anyerror!void,
 ) !void {
-    const sr = std.io.getStdIn().reader();
-    const sw = std.io.getStdOut().writer();
-    var br = std.io.bufferedReader(sr);
-    var bw = std.io.bufferedWriter(sw);
-    const stdin = br.reader();
-    const stdout = bw.writer();
-    try interact(allocator, stdin, stdout, solver);
-    try bw.flush();
+    var stdin_buf: [4096]u8 = undefined;
+    var stdout_buf: [4096]u8 = undefined;
+    var stdin = fs.File.stdin().readerStreaming(&stdin_buf);
+    const reader = &stdin.interface;
+    var stdout = fs.File.stdout().writer(&stdout_buf);
+    const writer = &stdout.interface;
+    try interact(allocator, reader, writer, solver);
 }
 
 pub fn DependencySizeSlice(comptime T: type, comptime field_name: []const u8) type {
@@ -421,8 +421,8 @@ pub fn DependencySizeSlice(comptime T: type, comptime field_name: []const u8) ty
         const size_field_name = field_name;
         slice: []const T,
 
-        fn scanFixedSizeAlloc(comptime ReaderType: type, allocator: std.mem.Allocator, scanner: *Scanner(ReaderType), size: usize) !Self {
-            var s = try allocator.alloc(T, size);
+        fn scanFixedSizeAlloc(allocator: mem.Allocator, scanner: *Scanner, size: usize) !Self {
+            const s = try allocator.alloc(T, size);
             for (s) |*e| {
                 e.* = try scanner.scanRaw(T, allocator);
             }
@@ -440,16 +440,17 @@ pub fn VerticalSlice(comptime T: type) type {
             return Self{ .slice = slice };
         }
 
-        fn scanAlloc(comptime ReaderType: type, allocator: std.mem.Allocator, scanner: *Scanner(ReaderType)) !Self {
-            var arr = std.ArrayList(T).init(allocator);
+        fn scanAlloc(allocator: mem.Allocator, scanner: *Scanner) !Self {
+            var arr = std.ArrayList(T).empty;
+            errdefer arr.deinit(allocator);
             while (true) {
                 const v = scanner.scanRaw(T, allocator) catch break;
-                try arr.append(v);
+                try arr.append(allocator, v);
             }
-            return Self{ .slice = arr.toOwnedSlice() };
+            return Self{ .slice = try arr.toOwnedSlice(allocator) };
         }
 
-        fn print(self: Self, comptime WriterType: type, printer: *Printer(WriterType)) WriterType.Error!void {
+        fn print(self: Self, printer: *Printer) std.io.Writer.Error!void {
             try printer.printLs(T, self.slice);
         }
     };
@@ -507,7 +508,7 @@ test "read rest" {
 }
 
 test "scan custom input" {
-    var allocator = testing.allocator;
+    const allocator = testing.allocator;
     const s =
         \\a
         \\-10
@@ -529,9 +530,8 @@ test "scan custom input" {
         sa: [10]u8,
         s2: [][]i32,
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     const s2: []const []const i32 = &.{
         &.{ 1, 2, 3 },
@@ -543,7 +543,7 @@ test "scan custom input" {
     try testing.expectEqual(@as(i32, -10), parsed.value.i);
     try testing.expectEqual(@as(f64, 12.3), parsed.value.f);
     try testing.expectEqualStrings("abc", parsed.value.s);
-    try testing.expectEqual(parsed.value.t, .{ .i = -11, .u = 22, .f = 33.3 });
+    try testing.expectEqual(@as(@TypeOf(parsed.value.t), .{ .i = -11, .u = 22, .f = 33.3 }), parsed.value.t);
     try testing.expectEqualStrings("defghijklm", &parsed.value.sa);
     var i: usize = 0;
     while (i < s2.len) : (i += 1) {
@@ -565,9 +565,8 @@ test "scan 2d array" {
         .{ -4, -5, -6 },
         .{ 7, 8, 9 },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     var i: usize = 0;
@@ -590,9 +589,8 @@ test "scan array slices" {
         .{ -4, -5, -6 },
         .{ 7, 8, 9 },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     var i: usize = 0;
@@ -615,9 +613,8 @@ test "scan slice arrays" {
         &.{ -4, -5, -6 },
         &.{ 7, 8, 9 },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     var i: usize = 0;
@@ -639,13 +636,11 @@ test "scan optional words" {
         .{ .i = 2, .c = 'b', .f = 2.2 },
         .{ .i = 3, .c = null, .f = null },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
-    var buf: [4096]u8 = undefined;
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     var i: u32 = 0;
     while (i < expected.len) : (i += 1) {
-        const actual = try scanner.scanLine(Row, &buf);
+        const actual = try scanner.scanLine(Row);
         try testing.expectEqual(expected[i], actual);
     }
 }
@@ -668,23 +663,22 @@ test "scan dependency size slice" {
         n: u32,
         s1: DependencySizeSlice(u32, "n"),
         m: u32,
-        s2: DependencySizeSlice(std.meta.Tuple(&.{ u32, u8 }), "m"),
+        s2: DependencySizeSlice(meta.Tuple(&.{ u32, u8 }), "m"),
     };
     const expected_s1 = [_]u32{ 10, 11, 12 };
-    const expected_s2 = [_]std.meta.Tuple(&.{ u32, u8 }){
+    const expected_s2 = [_]meta.Tuple(&.{ u32, u8 }){
         .{ 13, 'a' },
         .{ 14, 'b' },
         .{ 15, 'c' },
         .{ 16, 'd' },
         .{ 17, 'e' },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     try testing.expectEqualSlices(u32, &expected_s1, parsed.value.s1.slice);
-    try testing.expectEqualSlices(std.meta.Tuple(&.{ u32, u8 }), &expected_s2, parsed.value.s2.slice);
+    try testing.expectEqualSlices(meta.Tuple(&.{ u32, u8 }), &expected_s2, parsed.value.s2.slice);
 }
 
 test "scan vertical slice" {
@@ -698,9 +692,8 @@ test "scan vertical slice" {
     ;
     const Input = struct { vs: VerticalSlice(u32) };
     const expected = [_]u32{ 1, 2, 3, 4, 5 };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     try testing.expectEqualSlices(u32, &expected, parsed.value.vs.slice);
@@ -723,9 +716,8 @@ test "scan multiple lines with alloc" {
         .{ .i = 4, .c = "d" },
         .{ .i = 5, .c = "e" },
     };
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
     var i: usize = 0;
     while (i < expected.len) : (i += 1) {
         const parsed = try scanner.scanLineAlloc(Row, allocator);
@@ -753,12 +745,10 @@ test "scan multiple lines without alloc" {
         .{ .i = 5, .c = 'e' },
     };
     var actual: [5]Row = undefined;
-    var stream = std.io.fixedBufferStream(s);
-    const reader = stream.reader();
-    var scanner = Scanner(@TypeOf(reader)).init(reader);
-    var buf: [4096]u8 = undefined;
-    for (actual) |*e| {
-        e.* = try scanner.scanLine(Row, &buf);
+    var reader = std.io.Reader.fixed(s);
+    var scanner = Scanner.init(&reader);
+    for (&actual) |*e| {
+        e.* = try scanner.scanLine(Row);
     }
     try testing.expectEqualSlices(Row, &expected, &actual);
 }
@@ -780,16 +770,16 @@ test "print custom output" {
         i: i32,
         f: f64,
         s: []const u8,
-        t: std.meta.Tuple(&.{ u8, i32, f64 }),
+        t: meta.Tuple(&.{ u8, i32, f64 }),
         a: [10]u8,
         s2: []const []const i32,
     };
     var a: [10]u8 = undefined;
     var i: usize = 0;
     while (i < a.len) : (i += 1) {
-        a[i] = @intCast(u8, i) + '0';
+        a[i] = @as(u8, @intCast(i)) + '0';
     }
-    var s2 = &.{
+    const s2 = &.{
         &.{ 1, 2, 3 },
         &.{ 4, 5, 6 },
         &.{ 7, 8, 9 },
@@ -804,11 +794,11 @@ test "print custom output" {
         .s2 = s2,
     };
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(output);
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print comptime value" {
@@ -816,11 +806,11 @@ test "print comptime value" {
         \\-1 2.3 hello
     ;
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(.{ -1, 2.3, "hello" });
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print pointer of pointer" {
@@ -832,11 +822,11 @@ test "print pointer of pointer" {
     const Output = struct { i: i32, f: f64, c: u8 };
     const output = Output{ .i = -1, .f = 2.3, .c = 'a' };
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(&&output);
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print with format" {
@@ -850,10 +840,9 @@ test "print with format" {
         \\z
     ;
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
-    try printer.print("{}\n{}\n{}\n{}\n{}", .{
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
+    try printer.print("{f}\n{f}\n{f}\n{f}\n{f}", .{
         -1,
         2.3,
         &.{ 4, 5, 6 },
@@ -864,7 +853,8 @@ test "print with format" {
             .z = 'z',
         },
     });
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print 2d array" {
@@ -881,11 +871,11 @@ test "print 2d array" {
     };
     const output = Output{ .a2 = a2 };
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(output);
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print array slices" {
@@ -902,11 +892,11 @@ test "print array slices" {
     };
     const output = Output{ .as = as };
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(output);
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print slice arrays" {
@@ -923,11 +913,11 @@ test "print slice arrays" {
     };
     const output = Output{ .sa = sa };
     var buf: [4092]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(output);
-    try testing.expectEqualStrings(expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "print vertical slice" {
@@ -942,27 +932,25 @@ test "print vertical slice" {
     const vs = VerticalSlice(u32).init(&[_]u32{ 1, 2, 3, 4, 5 });
     const output = Output{ .vs = vs };
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    const writer = stream.writer();
-    var printer = Printer(@TypeOf(writer)).init(writer);
+    var writer = std.io.Writer.fixed(&buf);
+    var printer = Printer.init(&writer);
     try printer.printRaw(output);
-    try testing.expectEqualSlices(u8, expected, stream.getWritten());
+    try writer.flush();
+    try testing.expectEqualStrings(expected, writer.buffered());
 }
 
 test "interact like an echo" {
     const Input = struct { s: []const u8 };
     const Output = struct { s: []const u8 };
-    var input_buf = "Hello\n";
-    var output_buf: [input_buf.len]u8 = undefined;
-    var input_stream = std.io.fixedBufferStream(input_buf);
-    var output_stream = std.io.fixedBufferStream(&output_buf);
-    const reader = input_stream.reader();
-    const writer = output_stream.writer();
+    const input_buf = "Hello\n";
+    var output_buf: [input_buf.len + 1]u8 = undefined;
+    var reader = std.io.Reader.fixed(input_buf);
+    var writer = std.io.Writer.fixed(&output_buf);
     const s = struct {
         fn echo(
-            allocator: std.mem.Allocator,
-            scanner: *Scanner(@TypeOf(reader)),
-            printer: *Printer(@TypeOf(writer)),
+            allocator: mem.Allocator,
+            scanner: *Scanner,
+            printer: *Printer,
         ) !void {
             const parsed = try scanner.scanAllAlloc(Input, allocator);
             defer parsed.deinit();
@@ -974,9 +962,9 @@ test "interact like an echo" {
 
     try interact(
         testing.allocator,
-        reader,
-        writer,
+        &reader,
+        &writer,
         s.echo,
     );
-    try testing.expectEqualStrings(input_buf, &output_buf);
+    try testing.expectEqualStrings(input_buf, output_buf[0..input_buf.len]);
 }
