@@ -31,8 +31,8 @@ Modify the definition of the input type and output type within the template. Sup
 * Arrays and slices (up to 2D)
 * Structures (including tuples)
 * Optional (is null if parsing fails, used with input only)
-* ackitio.DependencySizeSlice (contains a slice with sizes dependent on other field values, used with input only)
-* ackitio.VerticalSlice (contains a slice with vertically variable length elements)
+* ackit.io.DependencySizeSlice (contains a slice with sizes dependent on other field values, used with input only)
+* ackit.io.VerticalSlice (contains a slice with vertically variable length elements)
 
 ### Example of scanning input
 ```
@@ -64,7 +64,7 @@ S
 ```zig
 const Output = struct { t: std.meta.Tuple(&.{i32, f64}), s: []const u8 };
 const output = Output{ .t = .{ 1, 2.3 }, .s = "abc" };
-try printer.print("{}", .{output});
+try printer.print("{f}", .{output});
 ```
 Since the output will have a new line for each field, you must use `std.meta.Tuple` to output multiple types of elements on a single line.
 If the type can be resolved by inference, an anonymous structure may be used to omit the definition of the `Output` structure.
@@ -75,21 +75,21 @@ Implement the solve function within the template to solve the problem:
 ```zig
 fn solve(
     allocator: std.mem.Allocator,
-    scanner: *ackitio.Scanner(ackitio.StdinReader),
-    printer: *ackitio.Printer(ackitio.StdoutWriter),
+    scanner: *ackit.io.Scanner,
+    printer: *ackit.io.Printer,
 ) !void {
     const parsed = try scanner.scanAllAlloc(Input, allocator);
     defer parsed.deinit();
     const input = input.value;
     // Implement your solution here.
     const output = ...
-    try printer.print("{}", .{output});
+    try printer.print("{f}", .{output});
 }
 ```
 
 
 ## Testing Input and Output
-You can use the `ackitio.interact` function to test input and output using custom `std.io.Reader` and `std.io.Writer`.
+You can use the `ackit.io.interact` function to test input and output using custom `std.io.Reader` and `std.io.Writer`.
 Note that Zig version 0.15.1 is required to run the test. This equals the version used by AtCoder as of March 28, 2026.
 
 
