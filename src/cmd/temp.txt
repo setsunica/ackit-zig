@@ -12,9 +12,8 @@ fn solve(
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try ackit.io.interactStdio(gpa.allocator(), solve);
+    var sfa = std.heap.stackFallback(4096, std.heap.page_allocator);
+    try ackit.io.interactStdio(sfa.get(), solve);
 }
 
 // zig fmt: off
